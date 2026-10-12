@@ -462,6 +462,25 @@ void Engine::vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what) {
     access.location = prop.location;
     access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
     piece = std::max(grain_, piece / grain_ * grain_);
+#if defined(STRATA_USE_HIP)
+    // ROCm 7.2.4 on gfx1200 refuses hipMemSetAccess when one reservation holds a whole piece
+    // (kArenaPiece, 64 MiB) together with a smaller one: 15 x 64 MiB + 4 KiB fails 3/3, 16 x 64 MiB
+    // holds, one single arbitrary-size piece holds (.pi/plans/poly-hip/m3-engine.txt, m4b-vmm.txt;
+    // tests/hip/vmm_probe.cpp phase 3 reports every shape).  Map whole pieces only: the expert cache
+    // gives up at most one piece -- <= 64 MiB, ~35 of 10496 experts at the measured 1.82 MiB a slot
+    // (.pi/plans/poly-hip/m4-run1.txt: 6352 experts in 11.3 GiB).  cover() passes piece = SIZE_MAX --
+    // one arbitrary-size piece, which this driver takes -- and it normalizes to SIZE_MAX / grain_ *
+    // grain_ here, so the KV path is left exactly as it is per call.  Engine scale is not equality:
+    // cover() maps one SIZE_MAX piece per call into each Kv reservation, so a larger piece after a
+    // smaller one is still refused at SetAccess; --kv-whole stays the supported 128K path (M4b.5
+    // arm A: a 20,000-token prompt at --max-context 131072 exits 1, "invalid argument").
+    //
+    // A call can therefore map only the largest whole-piece prefix of what was asked for -- possibly
+    // no new bytes at all -- and still return: the contract is m.mapped, which every caller re-reads,
+    // not the bytes passed in.
+    if (piece != SIZE_MAX / grain_ * grain_ && bytes > m.mapped)
+        bytes = m.mapped + (bytes - m.mapped) / piece * piece;
+#endif
     while (m.mapped < bytes) {
         const size_t n = std::min(bytes - m.mapped, piece);
         CUmemGenericAllocationHandle h = 0;
@@ -474,7 +493,22 @@ void Engine::vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what) {
         cu_ck(mapped, "mapping VRAM");
         m.pieces.emplace_back(h, n);
         m.mapped += n;
+#if defined(STRATA_USE_HIP)
+        // A refused SetAccess leaves no usable VRAM: give the piece back, so a caller that keeps what it
+        // mapped (fill_expert_cache's HIP path, and grow_cache) never touches a piece without access, and
+        // m.mapped means usable bytes.  The unmap's own result is ignored: this is the error path, and
+        // the throw below is the report.
+        const CUresult acc = cuMemSetAccess(at, n, &access, 1);
+        if (acc != CUDA_SUCCESS) {
+            m.pieces.pop_back();
+            m.mapped -= n;
+            cuMemUnmap(at, n);
+            cuMemRelease(h);
+        }
+        cu_ck(acc, "granting access to VRAM");
+#else
         cu_ck(cuMemSetAccess(at, n, &access, 1), "mapping VRAM");
+#endif
     }
 }
 
@@ -965,19 +999,57 @@ void Engine::fill_expert_cache() {
     const size_t most = vmm_ ? std::min(all, total_b) : full_bytes_ > 0 ? full_bytes_ : all;
     const size_t arena = std::min({all, free_b - reserve, arena_.base ? arena_.reserved - 256 : most});
     if (arena == 0) return;
+#if defined(STRATA_USE_HIP)
+    // HIP: whole pieces only (M4b.2), so the arena can hold less than it asked for.  The fill may use only
+    // what the card gave -- what is not mapped is not written (the memset below would run over reserved
+    // addresses), and what is not mapped is not the caches' to hold (budget_).
+    size_t have = arena;
+    std::string why;
+#endif
     if (vmm_) {   // in pieces, so that it can give some up to the attention caches (shrink_cache()) and grow
         if (!arena_.base) vmm_reserve(arena_, most + 256);   // addresses only: grow_cache() maps more of them
+#if defined(STRATA_USE_HIP)
+        try {
+            vmm_map(arena_, arena + 256, kArenaPiece, "the expert cache");
+        } catch (const std::runtime_error& e) {
+            why = e.what();   // copied: the catch object is gone before the line below is printed
+        }
+        have = std::min(arena, arena_.mapped >= kTail ? arena_.mapped - kTail : 0);
+        if (have < arena)
+            std::fprintf(stderr, "strata-poly: the expert cache mapped %.2f GiB of the %.2f GiB it asked for%s%s; "
+                                 "keeping what the card gave\n",
+                         (double) have / (1 << 30), (double) arena / (1 << 30), why.empty() ? "" : " (",
+                         why.empty() ? "" : (why + ")").c_str());
+        if (have == 0) {   // nothing at all: the experts stay in RAM (the !exp_ state the engine already runs), and
+                           // --kv-whole is the supported path when a driver refuses hipMem* outright
+            exp_ = nullptr;
+            return;
+        }
+        exp_ = (uint8_t*) arena_.base;
+#else
         vmm_map(arena_, arena + 256, kArenaPiece, "the expert cache");
         exp_ = (uint8_t*) arena_.base;
+#endif
         budget_ = free_b - reserve;   // when it holds every expert, what is left over goes to the rows first
         for (const Kv& k : kv_) budget_ += k.mapped;
+#if defined(STRATA_USE_HIP)
+        budget_ -= arena - have;   // VRAM the card did not give is not the caches' to hold
+#endif
     } else {
         exp_ = (uint8_t*) dmalloc(arena + 256, "the expert cache");
     }
+#if defined(STRATA_USE_HIP)
+    ck(cudaMemset(exp_, 0, have + kTail), "the expert cache");   // the slots' tails stay zero (kTail)
+#else
     ck(cudaMemset(exp_, 0, arena + 256), "the expert cache");   // the slots' tails stay zero (kTail)
+#endif
     // Which experts is by value; where they go is by layer, a layer's side by side in the experts' order.
     std::vector<Cand> taken;
+#if defined(STRATA_USE_HIP)
+    size_t room = have;
+#else
     size_t room = arena;
+#endif
     for (const Cand& c : cands) {
         if (c.bytes > room) continue;   // a smaller expert of another layer may still fit
         room -= c.bytes;
@@ -999,7 +1071,11 @@ void Engine::fill_expert_cache() {
         ++cached_;
     }
     if (full_bytes_ == 0) {
+#if defined(STRATA_USE_HIP)
+        full_bytes_ = have;
+#else
         full_bytes_ = arena;
+#endif
         full_cached_ = cached_;
     }
 }

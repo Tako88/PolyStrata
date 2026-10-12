@@ -19,6 +19,25 @@
 //            each at a piece offset, SetAccess per piece, run a stream kernel across the whole
 //            range, unmap the last piece only, map a different handle into the freed slot,
 //            SetAccess it, read it back, then tear the whole thing down.
+//
+//   Phase 3  the driver's mixed-size rule (M4b.1), one reservation per shape, mapped piece by
+//            piece.  Measured on this stack (ROCm 7.2.4, gfx1200): a reservation that holds a
+//            whole kArenaPiece (64 MiB) together with a smaller piece is refused at
+//            hipMemSetAccess -- 15 x 64 MiB + 4 KiB fails 3/3, 15 x 64 MiB + 17829888 B fails,
+//            4 KiB first then 15 x 64 MiB fails 5/5 -- while uniform pieces (16 x 64 MiB), a
+//            single piece (16 x 64 MiB + 4 KiB), and a smaller piece that is only reserved (not
+//            mapped) all hold.  The order matters, and the plan's "size order was tested and
+//            refuted" is not what phase 3 measures: a larger piece after a smaller one fails
+//            (64 MiB then 1024 MiB fails, 4 KiB then 64 MiB fails), while a smaller piece after a
+//            larger one holds (1024 MiB then 64 MiB holds).  Alignment was tested and does not
+//            matter.  The engine works around it by mapping whole pieces only
+//            (src/poly/engine.cpp, M4b.2).
+//            A driver that fixes the rule shows up here as the mixed shapes turning to "holds".
+//            No shape allocates more than 1.1 GiB and each tears down before the next, so the
+//            probe stays runnable beside a desktop; the diagnosis's 240-piece / 15 GiB case is
+//            not reproduced (it needs the whole card).
+//            Reporting, not gating: a DOES NOT HOLD here is the driver's rule, not a test
+//            failure, and phase 3 does not change the exit code.
 
 #include <hip/hip_runtime.h>
 
@@ -240,6 +259,149 @@ void phase2(int device) {
     report_call("hipMemAddressFree(N*g)", hipMemAddressFree(base, reserve));
 }
 
+// M4b.1: the driver's mixed-size rule, recorded rather than asserted.  One reservation per shape;
+// for each piece hipMemCreate -> hipMemMap at the running offset -> hipMemSetAccess; the shape stops
+// at the first failure and the failing call is named.  Every shape tears down before the next.
+size_t up_to(size_t n, size_t g) { return (n + g - 1) / g * g; }
+
+struct Shape {
+    const char* label;
+    std::vector<size_t> pieces;   // mapped in this order, at the running offset
+    size_t reserve_extra;         // reserved but never mapped (shape "the 4 KiB reserved but not mapped")
+    bool mixed;                   // pieces of unequal size: the shapes the driver's rule is about
+};
+
+Shape make_shape(const char* label, std::vector<size_t> pieces, size_t extra, bool mixed) {
+    Shape s;
+    s.label = label;
+    s.pieces = std::move(pieces);
+    s.reserve_extra = extra;
+    s.mixed = mixed;
+    return s;
+}
+
+void phase3(int device) {
+    std::printf("\nPhase 3 - the driver's mixed-size rule (reporting, not gating)\n");
+    const hipMemAllocationProp prop = pinned_prop(device);
+    const hipMemAccessDesc access = readwrite(prop);
+
+    size_t g = 0;
+    if (!report_call("hipMemGetAllocationGranularity(hipMemAllocationGranularityMinimum)",
+                     hipMemGetAllocationGranularity(&g, &prop, hipMemAllocationGranularityMinimum)))
+        return;
+    if (g == 0) {
+        report("the granularity is a positive number of bytes", false);
+        return;
+    }
+
+    const size_t KiB = size_t(1) << 10;
+    const size_t MiB = size_t(1) << 20;
+    const size_t p64 = 64 * MiB;
+    const std::vector<size_t> fifteen(15, p64);
+    const std::vector<size_t> sixteen(16, p64);
+
+    std::vector<Shape> shapes;
+    {
+        std::vector<size_t> p = fifteen;
+        p.push_back(4 * KiB);
+        shapes.push_back(make_shape("15 x 64 MiB + 4 KiB", std::move(p), 0, true));
+    }
+    {
+        std::vector<size_t> p = fifteen;
+        p.push_back(17829888);
+        shapes.push_back(make_shape("15 x 64 MiB + 17829888 B", std::move(p), 0, true));
+    }
+    shapes.push_back(make_shape("16 x 64 MiB", sixteen, 0, false));
+    shapes.push_back(make_shape("16 x 64 MiB, the 4 KiB reserved but not mapped", sixteen, 4 * KiB, false));
+    shapes.push_back(make_shape("one piece of 16 x 64 MiB + 4 KiB", {16 * p64 + 4 * KiB}, 0, false));
+    {
+        std::vector<size_t> p;
+        p.push_back(4 * KiB);
+        p.insert(p.end(), fifteen.begin(), fifteen.end());
+        shapes.push_back(make_shape("4 KiB first, then 15 x 64 MiB", std::move(p), 0, true));
+    }
+    shapes.push_back(make_shape("1024 MiB then 64 MiB", {1024 * MiB, p64}, 0, true));
+    shapes.push_back(make_shape("64 MiB then 1024 MiB", {p64, 1024 * MiB}, 0, true));
+
+    bool mixed_holds = true;
+    for (const Shape& s : shapes) {
+        size_t free_before = 0, total = 0;
+        (void) hipMemGetInfo(&free_before, &total);
+        size_t want = s.reserve_extra;
+        for (size_t n : s.pieces) want += n;
+        const size_t reserve = up_to(want, g);
+        std::printf("\n  shape %s\n", s.label);
+        std::printf("    %zu piece(s) in a %zu-byte reservation, free VRAM %zu MiB before\n", s.pieces.size(),
+                    reserve, free_before >> 20);
+        for (size_t i = 0; i < s.pieces.size(); ++i)
+            std::printf("      piece %zu of %zu: %zu bytes\n", i + 1, s.pieces.size(), s.pieces[i]);
+        if (s.reserve_extra) std::printf("      reserved but not mapped: %zu bytes\n", s.reserve_extra);
+
+        void* base = nullptr;
+        if (!report_call("hipMemAddressReserve", hipMemAddressReserve(&base, reserve, 0, nullptr, 0))) {
+            if (s.mixed) mixed_holds = false;
+            continue;
+        }
+
+        std::vector<hipMemGenericAllocationHandle_t> handle(s.pieces.size(), nullptr);
+        std::vector<bool> created(s.pieces.size(), false), mapped(s.pieces.size(), false);
+        bool shape_holds = true;
+        size_t at_off = 0;
+        for (size_t i = 0; i < s.pieces.size() && shape_holds; ++i) {
+            const size_t n = s.pieces[i];
+            void* at = static_cast<unsigned char*>(base) + at_off;
+            char label[128];
+            std::snprintf(label, sizeof label, "hipMemCreate piece %zu of %zu (%zu bytes)", i + 1,
+                          s.pieces.size(), n);
+            const hipError_t cr = hipMemCreate(&handle[i], n, &prop, 0);
+            if (cr != hipSuccess) {
+                report_call(label, cr);
+                shape_holds = false;
+                break;
+            }
+            created[i] = true;
+            std::snprintf(label, sizeof label, "hipMemMap piece %zu of %zu (%zu bytes) at offset %zu", i + 1,
+                          s.pieces.size(), n, at_off);
+            const hipError_t mr = hipMemMap(at, n, 0, handle[i], 0);
+            if (mr != hipSuccess) {
+                report_call(label, mr);
+                shape_holds = false;
+                break;
+            }
+            mapped[i] = true;
+            std::snprintf(label, sizeof label, "hipMemSetAccess piece %zu of %zu (%zu bytes)", i + 1,
+                          s.pieces.size(), n);
+            const hipError_t ar = hipMemSetAccess(at, n, &access, 1);
+            if (ar != hipSuccess) {
+                report_call(label, ar);
+                shape_holds = false;
+                break;
+            }
+            at_off += n;
+        }
+        if (shape_holds)
+            report(s.label, true);
+        else {
+            std::printf("  %-58s %s\n", s.label, "DOES NOT HOLD");
+            if (s.mixed) mixed_holds = false;
+        }
+
+        // Tear the shape down before the next one, whether it held or not.
+        size_t off = 0;
+        for (size_t i = 0; i < s.pieces.size(); ++i) {
+            if (mapped[i]) (void) hipMemUnmap(static_cast<unsigned char*>(base) + off, s.pieces[i]);
+            if (created[i]) (void) hipMemRelease(handle[i]);
+            off += s.pieces[i];
+        }
+        (void) hipMemAddressFree(base, reserve);
+        size_t free_after = 0;
+        (void) hipMemGetInfo(&free_after, &total);
+        std::printf("    reserved base %p, free VRAM %zu MiB after\n", base, free_after >> 20);
+    }
+
+    report("the driver's mixed-size rule on this stack", mixed_holds);
+}
+
 }  // namespace
 
 int main() {
@@ -260,6 +422,7 @@ int main() {
 
     phase1(device);
     phase2(device);
+    phase3(device);
 
     std::printf("\n%d check(s) did not hold\n", not_held);
     (void) hipGetLastError();
