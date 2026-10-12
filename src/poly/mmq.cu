@@ -16,7 +16,8 @@ namespace {
 // an extra type here is a link error, not a silent gap.  This is the first HIP compilation of these instances on
 // gfx1200 (the first engine's K-quant branch needs STRATA_MMQ_KQUANTS, which setup does not pass).
 #ifdef STRATA_POLY_MMQ_HIP
-#define STRATA_POLY_MMQ_TYPES(X) X(Q4_K) X(Q5_K) X(Q6_K) X(Q8_0)   /* M3 widens from step 0.2's histogram */
+/* M3's list: step 0.2's histogram of this file, no step 3.2 widening (no tensor for those types). */
+#define STRATA_POLY_MMQ_TYPES(X) X(Q4_K) X(Q5_K) X(Q6_K) X(Q8_0)
 #else
 // The types with kernels in this build: one template instance each in CMakeLists.txt.
 #define STRATA_POLY_MMQ_TYPES(X)                                                                                \

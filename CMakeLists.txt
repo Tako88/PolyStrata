@@ -1695,7 +1695,19 @@ if(STRATA_POLY_HIP)
   endif()
   # Step 0.2's histogram decides this list.  It is NOT the K-quant set from the first engine's
   # STRATA_MMQ_KQUANTS branch (setup.py:2913-2917 never passes that flag): these are first-time gfx1200 compiles.
-  set(_strata_poly_hip_types q4_k q5_k q6_k q8_0)   # M3 extends this from the histogram
+  #
+  # M3 (instances tried, none failed).  UD-Q4_K_M's tensors are F32 368, Q8_0 259, Q4_K 82, Q5_K 38, Q6_K 4,
+  # BF16 2 - so this list is exactly the model's quantized types and step 3.2's three widen groups
+  # (q4_0 q5_0 iq4_nl iq4_xs / q4_1 q2_k q3_k / iq1_s iq2_* iq3_*) have no tensor here to serve; they stay out
+  # rather than grow the build.  q5_1 is left out for the same reason (no Q5_1 tensor in this file), though the
+  # first engine builds it under STRATA_MMQ_KQUANTS.
+  # Step 3.4 gate, build-poly-hip/poly_expert_parity models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf, exit 0, no FAIL:
+  #   Q4_K [2048 -> 512]   vector 0.0115, batch 0.031365
+  #   Q5_K [ 512 -> 2048]  vector 0.0110, batch 0.030740
+  #   Q6_K [ 512 -> 2048]  vector 0.0115, batch 0.011463
+  # None printed "(no tile)", so no type was dropped and no compiler error is recorded.  Keep this list and
+  # src/poly/mmq.cu's STRATA_POLY_MMQ_TYPES one-for-one: an extra type there is a link error, not a gap.
+  set(_strata_poly_hip_types q4_k q5_k q6_k q8_0)
   set(_strata_poly_hip_instances "")
   foreach(_t IN LISTS _strata_poly_hip_types)
     list(APPEND _strata_poly_hip_instances "${_strata_mmq}/template-instances/mmq-instance-${_t}.cu")
