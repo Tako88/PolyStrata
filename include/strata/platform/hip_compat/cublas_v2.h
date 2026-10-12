@@ -1,4 +1,6 @@
 // cublas_v2.h for a STRATA_ENABLE_HIP build: the cuBLAS names src/prefill/gemm.cu uses, on hipBLAS.
+// The poly engine (strata-poly) needs hipBLAS 1.0 or newer (cublasSgemm/cublasSgemmStridedBatched); this gfx906
+// compat shim does not provide them, and a HIP poly build requires STRATA_ENABLE_HIP's own shim.
 #pragma once
 #include "strata_hip.h"
 #ifndef HIPBLAS_V2

@@ -12,10 +12,17 @@
 namespace strata::poly {
 namespace {
 
+// The types here and the instance list in the STRATA_POLY_HIP block of CMakeLists.txt are one list in two places:
+// an extra type here is a link error, not a silent gap.  This is the first HIP compilation of these instances on
+// gfx1200 (the first engine's K-quant branch needs STRATA_MMQ_KQUANTS, which setup does not pass).
+#ifdef STRATA_POLY_MMQ_HIP
+#define STRATA_POLY_MMQ_TYPES(X) X(Q4_K) X(Q5_K) X(Q6_K) X(Q8_0)   /* M3 widens from step 0.2's histogram */
+#else
 // The types with kernels in this build: one template instance each in CMakeLists.txt.
 #define STRATA_POLY_MMQ_TYPES(X)                                                                                \
     X(Q4_0) X(Q4_1) X(Q5_0) X(Q5_1) X(Q8_0) X(Q2_K) X(Q3_K) X(Q4_K) X(Q5_K) X(Q6_K)                             \
     X(IQ1_S) X(IQ2_XXS) X(IQ2_XS) X(IQ2_S) X(IQ3_XXS) X(IQ3_S) X(IQ4_NL) X(IQ4_XS)
+#endif
 
 int64_t pad512(int64_t n) { return (n + 511) / 512 * 512; }
 

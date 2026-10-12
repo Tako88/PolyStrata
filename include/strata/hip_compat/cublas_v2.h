@@ -4,6 +4,9 @@
 
 #if hipblasVersionMajor == 0
 // Ubuntu's hipBLAS 0.54 has no workspace API or compute-type enum. Use its
+// The poly engine (strata-poly) needs hipBLAS 1.0 or newer: it calls cublasSgemm/cublasSgemmStridedBatched,
+// which the 0.54 branch does not map.  A HIP poly build on 0.54 is refused at configure time (CMakeLists.txt's
+// STRATA_POLY_HIP block).
 // underlying rocBLAS API directly, including ownership of the real handle,
 // so the engine's explicit workspace contract is preserved.
 #include <rocblas/rocblas.h>
@@ -43,6 +46,8 @@ inline rocblas_status cublasGemmEx(rocblas_handle h, rocblas_operation trans_a,
 #define CUBLAS_COMPUTE_32F HIPBLAS_COMPUTE_32F
 #define CUBLAS_DEFAULT_MATH HIPBLAS_DEFAULT_MATH
 #define CUBLAS_GEMM_DEFAULT HIPBLAS_GEMM_DEFAULT
+// hipBLAS has no tensor-op algo enum; its only algo is HIPBLAS_GEMM_DEFAULT
+#define CUBLAS_GEMM_DEFAULT_TENSOR_OP HIPBLAS_GEMM_DEFAULT
 #define CUBLAS_OP_N HIPBLAS_OP_N
 #define CUBLAS_OP_T HIPBLAS_OP_T
 #define CUBLAS_STATUS_SUCCESS HIPBLAS_STATUS_SUCCESS
@@ -52,9 +57,12 @@ inline rocblas_status cublasGemmEx(rocblas_handle h, rocblas_operation trans_a,
 #define cublasCreate hipblasCreate
 #define cublasDestroy hipblasDestroy
 #define cublasGemmEx hipblasGemmEx
+#define cublasGemmStridedBatchedEx hipblasGemmStridedBatchedEx
 #define cublasHandle_t hipblasHandle_t
 #define cublasSetMathMode hipblasSetMathMode
 #define cublasSetStream hipblasSetStream
 #define cublasSetWorkspace hipblasSetWorkspace
+#define cublasSgemm hipblasSgemm
+#define cublasSgemmStridedBatched hipblasSgemmStridedBatched
 #define cublasStatus_t hipblasStatus_t
 #endif

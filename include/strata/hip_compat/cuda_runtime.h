@@ -94,6 +94,7 @@ hipError_t mem_get_info(size_t* free_bytes, size_t* total_bytes);
 #define cudaMemGetInfo hipMemGetInfo
 #endif
 #define cudaMemcpy hipMemcpy
+#define cudaMemcpy2D hipMemcpy2D
 #define cudaMemcpy2DAsync hipMemcpy2DAsync
 #define cudaMemcpyAsync hipMemcpyAsync
 #define cudaMemcpyPeerAsync hipMemcpyPeerAsync
@@ -140,6 +141,8 @@ inline hipError_t cudaGraphInstantiate(hipGraphExec_t* exec, hipGraph_t graph,
                                      hipGraphNode_t* error, char* log, size_t size) {
     return hipGraphInstantiate(exec, graph, error, log, size);
 }
+// The engine's call passes flags 0; HIP documents that this API supports no flag and behaves as hipGraphInstantiate.
+#define cudaGraphInstantiateWithFlags hipGraphInstantiateWithFlags
 #define __trap() __builtin_trap()   // the compiled-out sm_80 paths (never selected on AMD)
 #define cudaMemcpyToSymbol(symbol, ...) hipMemcpyToSymbol(HIP_SYMBOL(symbol), __VA_ARGS__)
 

@@ -70,6 +70,7 @@ if(STRATA_HIP_GFX906)
 endif()
 option(STRATA_ENABLE_HIP "Build the HIP targets for wave32 AMD GPUs (gfx1100, gfx1201; gfx1012/gfx1030 unvalidated)" OFF)
 option(STRATA_PREFILL_MMQ "Build the optional GGML MMQ prefill path for HIP" OFF)
+option(STRATA_POLY_HIP "Build the strata-poly engine for AMD wave32 GPUs through HIP (opt-in; CUDA builds never see it)" OFF)
 # CUDA: MMQ prompt kernels for Q4_K / Q5_K / Q5_1 (Unsloth's UD-Q4_K_XL experts).  Off by default: the engine loads
 # every kernel when it starts (CUDA_MODULE_LOADING=EAGER), so these took ~5 MB of VRAM - 1-3 expert slots - from every
 # model, and the UD-Q4_K_XL prompt is SSD-bound with or without them (docs/UNSLOTH_Q4.md)
@@ -1675,6 +1676,53 @@ if(STRATA_ENABLE_CUDA AND STRATA_NATIVE_EXPERTS AND NOT STRATA_ENABLE_HIP AND NO
                                                   ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target}
                                                   Threads::Threads)
   # the pool of the CPU experts, without a model
+  add_executable(poly_workers_test src/poly/workers_test.cpp src/poly/cpu_experts.cpp)
+  target_include_directories(poly_workers_test PRIVATE ${_strata_gg}/include)
+  target_link_libraries(poly_workers_test PRIVATE ggml-cpu ggml-base Threads::Threads)
+  add_test(NAME poly_workers_test COMMAND poly_workers_test)
+endif()
+
+# ---- strata-poly on AMD: the same engine compiled as HIP (opt-in STRATA_POLY_HIP=ON) ----
+if(STRATA_POLY_HIP)
+  if(NOT STRATA_ENABLE_HIP)
+    message(FATAL_ERROR "STRATA_POLY_HIP needs STRATA_ENABLE_HIP=ON")
+  endif()
+  if(NOT STRATA_PREFILL_MMQ OR NOT _strata_mmq OR NOT _strata_gg)
+    message(FATAL_ERROR "STRATA_POLY_HIP needs STRATA_PREFILL_MMQ=ON (ggml-cuda's MMQ sources and host symbols)")
+  endif()
+  if(hipblas_VERSION VERSION_LESS "1.0")
+    message(FATAL_ERROR "STRATA_POLY_HIP needs hipBLAS 1.0 or newer (this tree has ${hipblas_VERSION})")
+  endif()
+  # Step 0.2's histogram decides this list.  It is NOT the K-quant set from the first engine's
+  # STRATA_MMQ_KQUANTS branch (setup.py:2913-2917 never passes that flag): these are first-time gfx1200 compiles.
+  set(_strata_poly_hip_types q4_k q5_k q6_k q8_0)   # M3 extends this from the histogram
+  set(_strata_poly_hip_instances "")
+  foreach(_t IN LISTS _strata_poly_hip_types)
+    list(APPEND _strata_poly_hip_instances "${_strata_mmq}/template-instances/mmq-instance-${_t}.cu")
+  endforeach()
+  add_library(strata_poly_mmq STATIC src/poly/mmq.cu src/prefill/ggml_cuda_host.cu "${_strata_mmq}/quantize.cu"
+              ${_strata_poly_hip_instances})
+  # CMake infers CUDA from .cu; the shared glob (cmake/hip_backend.cmake:117-121) covers src/*.cu only, not the
+  # ggml tree, so the ggml-cuda sources must be marked HIP here, exactly as the first engine's HIP block does
+  # (CMakeLists.txt:1436-1438).  Without this, a STRATA_ENABLE_CUDA=OFF build stops at configure.
+  set_source_files_properties("${_strata_mmq}/quantize.cu" ${_strata_poly_hip_instances} PROPERTIES LANGUAGE HIP)
+  # Strata's own CUDA-shaped source takes the shim (mirrors src/prefill/moe_fused.cu at :1439-1440); ggml-cuda does not
+  set_source_files_properties(src/poly/mmq.cu src/poly/kernels.cu
+                              PROPERTIES INCLUDE_DIRECTORIES "${STRATA_HIP_COMPAT_INCLUDE_DIR}")
+  target_include_directories(strata_poly_mmq PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
+                                                    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_compile_definitions(strata_poly_mmq PRIVATE GGML_USE_HIP=1 STRATA_POLY_MMQ_HIP=1)
+  target_link_libraries(strata_poly_mmq PUBLIC ggml-base hip::host roc::hipblas)   # NOT strata_hip_runtime: see Risks
+  add_executable(strata-poly src/poly/main.cpp src/poly/engine.cpp src/poly/glm5next.cpp src/poly/qwen35.cpp
+                            src/poly/gemma4.cpp src/poly/cpu_experts.cpp src/poly/kernels.cu
+                            src/core/conversation_memory.cpp)
+  target_include_directories(strata-poly PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
+  target_link_libraries(strata-poly PRIVATE strata_poly_mmq strata_kernels strata_spec ggml-cpu ggml-base
+                                           ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target} Threads::Threads)
+  add_executable(poly_expert_parity src/poly/expert_parity.cpp src/poly/cpu_experts.cpp src/poly/kernels.cu)
+  target_include_directories(poly_expert_parity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
+  target_link_libraries(poly_expert_parity PRIVATE strata_poly_mmq strata_kernels ggml-cpu ggml-base
+                                                  ${_strata_gpu_blas_target} ${_strata_gpu_runtime_target} Threads::Threads)
   add_executable(poly_workers_test src/poly/workers_test.cpp src/poly/cpu_experts.cpp)
   target_include_directories(poly_workers_test PRIVATE ${_strata_gg}/include)
   target_link_libraries(poly_workers_test PRIVATE ggml-cpu ggml-base Threads::Threads)
