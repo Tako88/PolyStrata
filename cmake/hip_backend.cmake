@@ -119,7 +119,9 @@ file(GLOB_RECURSE _strata_hip_sources CONFIGURE_DEPENDS
 if(_strata_hip_sources)
   set_source_files_properties(${_strata_hip_sources} PROPERTIES LANGUAGE HIP)
 endif()
-foreach(_source IN ITEMS tests/hip/intrinsics.cpp tests/hip/native_qsa_score.cpp)
+# vmm_probe.cpp has device kernels (the plan's M1 probe), like intrinsics.cpp: a .cpp HIP test that must
+# compile as HIP so its __global__ functions exist. hip_mapped_alias.cpp-style host-only tests stay CXX.
+foreach(_source IN ITEMS tests/hip/intrinsics.cpp tests/hip/native_qsa_score.cpp tests/hip/vmm_probe.cpp)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_source}")
     set_source_files_properties("${_source}" PROPERTIES LANGUAGE HIP)
   endif()

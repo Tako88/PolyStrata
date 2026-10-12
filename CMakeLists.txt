@@ -647,6 +647,16 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
       set_tests_properties(hip_mapped_alias PROPERTIES SKIP_RETURN_CODE 77)
       list(APPEND _strata_hip_tests hip_mapped_alias)
     endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/hip/vmm_probe.cpp")
+      # M1: does the engine's multi-piece VMM path (reserve -> create -> map per piece -> SetAccess ->
+      # unmap the last piece -> remap) work on this stack? A reporting diagnostic: exits 0 whenever it
+      # ran, 77 without a device. Decides M2's branch (A = VMM on, B = compiled out).
+      add_executable(hip_vmm_probe tests/hip/vmm_probe.cpp)
+      target_link_libraries(hip_vmm_probe PRIVATE strata_kernels strata_hip_runtime)
+      add_test(NAME hip_vmm_probe COMMAND hip_vmm_probe)
+      set_tests_properties(hip_vmm_probe PROPERTIES SKIP_RETURN_CODE 77)
+      list(APPEND _strata_hip_tests hip_vmm_probe)
+    endif()
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/hip/native_qsa_score.cpp")
       add_executable(hip_native_qsa_score tests/hip/native_qsa_score.cpp)
       target_link_libraries(hip_native_qsa_score PRIVATE strata_kernels strata_hip_runtime)
