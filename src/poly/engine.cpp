@@ -468,12 +468,10 @@ void Engine::vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what) {
     // holds, one single arbitrary-size piece holds (.pi/plans/poly-hip/m3-engine.txt, m4b-vmm.txt;
     // tests/hip/vmm_probe.cpp phase 3 reports every shape).  Map whole pieces only: the expert cache
     // gives up at most one piece -- <= 64 MiB, ~35 of 10496 experts at the measured 1.82 MiB a slot
-    // (.pi/plans/poly-hip/m4-run1.txt: 6352 experts in 11.3 GiB).  cover() passes piece = SIZE_MAX --
-    // one arbitrary-size piece, which this driver takes -- and it normalizes to SIZE_MAX / grain_ *
-    // grain_ here, so the KV path is left exactly as it is per call.  Engine scale is not equality:
-    // cover() maps one SIZE_MAX piece per call into each Kv reservation, so a larger piece after a
-    // smaller one is still refused at SetAccess; --kv-whole stays the supported 128K path (M4b.5
-    // arm A: a 20,000-token prompt at --max-context 131072 exits 1, "invalid argument").
+    // (.pi/plans/poly-hip/m4-run1.txt: 6352 experts in 11.3 GiB).  M4c: cover() passes one kKvGrow-row
+    // chunk under this same guard, so every piece a Kv reservation holds is the same size -- the shape
+    // this driver takes (M4b.1 phase 3: 64 MiB then 1024 MiB fails, 240 equal pieces hold) -- while the
+    // CUDA side keeps the one SIZE_MAX piece it has today.
     //
     // A call can therefore map only the largest whole-piece prefix of what was asked for -- possibly
     // no new bytes at all -- and still return: the contract is m.mapped, which every caller re-reads,
@@ -566,7 +564,32 @@ void Engine::cover(int64_t end) {
         if (free_b < more + quarter) cut = std::max(cut, more + quarter - free_b);
         if (cut) shrink_cache(cut);
     }
+#if defined(STRATA_USE_HIP)
+    // M4c: one kKvGrow-row chunk per piece.  The M4b call asked for the whole growth as one SIZE_MAX piece,
+    // so the load's cover(1) mapped 4096 rows and the first prefill past it mapped a LARGER piece into the
+    // same reservation -- the shape hipMemSetAccess refuses on this stack (15 x 64 MiB + 4 KiB fails 3/3,
+    // 16 x 64 MiB holds, and 64 MiB then 1024 MiB is the same rule: tests/hip/vmm_probe.cpp phase 3,
+    // .pi/plans/poly-hip/m4b-vmm.txt).  m4b-evidence.txt arm A: the 20,000-token prompt at --max-context
+    // 131072 exits 1, "mapping VRAM: invalid argument".  A chunk is what one cover step grows by when
+    // kKvGrow is a whole number of the cache's `per`, and the piece is only passed when the chunk is also a
+    // whole number of granularities: otherwise the growth is not a whole number of pieces, and vmm_map's
+    // whole-piece rounding (:481) would map a short prefix while cover() still counts the rows below `end`
+    // as mapped.  Both hold here (per = 1 for keys and vals, qwen35.cpp:133), and so does a whole number of
+    // rows: when --max-context is not a multiple of kKvGrow the clamp above leaves the last growth short
+    // (:553), size(k) is not a whole number of chunks, and the same rounding would apply to k's whole
+    // mapping.  rows % kKvGrow != 0 sends that case to today's one SIZE_MAX piece, which maps fully or
+    // throws, instead of silently under-mapping and then counting the rows as mapped.  The CUDA side keeps
+    // that one SIZE_MAX piece it has today.
+    for (Kv& k : kv_) {
+        const size_t chunk = (size_t) ((kKvGrow + k.per - 1) / k.per) * k.bytes;
+        if (kKvGrow % k.per == 0 && chunk % grain_ == 0 && rows % kKvGrow == 0)
+            vmm_map(k, size(k), chunk, "the attention cache");
+        else
+            vmm_map(k, size(k), SIZE_MAX, "the attention cache");   // today's call, unchanged
+    }
+#else
     for (Kv& k : kv_) vmm_map(k, size(k), SIZE_MAX, "the attention cache");
+#endif
     kv_rows_ = rows;
 }
 
