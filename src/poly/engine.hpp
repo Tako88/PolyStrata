@@ -41,6 +41,11 @@ struct Options {
     int threads = 0;              ///< 0: the CPUs this process may use
     int vram_reserve_mib = -1;    ///< left free after the expert cache is filled; below 0: by the card's size
     bool vram_plan = false;       ///< opt-in (HIP): size the expert cache at load for the whole context's attention
+    bool vram_free_from_card = false; ///< opt-in (HIP, STRATA_VRAM_FREE_FROM=card): read the card's own free VRAM
+                                  ///< where hipMemGetInfo is read today.  On this stack hipMemGetInfo counts this
+                                  ///< process alone -- engine 4356 MiB against a card with 1409 MiB beside a 2048 MiB
+                                  ///< Vulkan client -- and a plan-off load sized on it left the card 786 MiB free
+                                  ///< against a 2560 MiB reserve (.pi/plans/poly-hip/m25-128k.txt).
                                   ///< caches, so the reserve above stays free as the conversation grows; false:
                                   ///< today's load-time sizing
     std::string profile;          ///< expert use counts; orders the expert cache, and save_profile() adds to it
@@ -259,6 +264,7 @@ public:
     /// first card's reserve and the least that one of them has free.
     int reserve_mib() const { return reserve_mib_; }
     int64_t vram_free_mib() const;
+    int64_t card_free_mib() const; ///< the card's own free VRAM, every client counted; -1 when it cannot be read
     /// What the reservations hold unused: the bytes of the pieces vmm_unmap() gave back and that vmm_map() will
     /// re-map (Mapped::free, HIP only), in MiB.  Reported (main.cpp's INFO line and the VRAM command) and
     /// counted as free where this engine decides what the caches may hold: fill_expert_cache()'s sizing and
@@ -541,6 +547,7 @@ protected:
     int64_t kv_rows_ = 0;        ///< the rows they have VRAM for
     size_t budget_ = 0;          ///< their VRAM and the expert cache's together, as the cache was filled
     int asked_reserve_mib_ = -1; ///< Options::vram_reserve_mib as load() got it
+    mutable std::string card_vram_;  ///< sysfs device dir of this card, for card_free_mib()
     int reserve_mib_ = 0;        ///< what the cache was sized to leave free
     bool ram_tight_ = false;     ///< the machine's RAM is within 4 GiB of the model's files (fill_expert_cache())
     int minds_ = 0;              ///< mind_vram()'s calls

@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <cctype>
+#include <fstream>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1053,6 +1055,42 @@ int64_t Engine::vram_free_mib() const {
     return next_ ? std::min(mib, next_->vram_free_mib()) : mib;
 }
 
+// The kernel's own free-VRAM figure for this card, every client counted -- including other programs, which
+// hipMemGetInfo on this stack does not report (m24-live-oscillation.txt, m25-128k.txt).  The card is found
+// once, by asking HIP for this device's PCI id and matching it to the DRM cards' uevents; -1 when that or the
+// files fail, and the caller then keeps the figure it already had.
+int64_t Engine::card_free_mib() const {
+#if defined(STRATA_USE_HIP)
+    if (card_vram_.empty()) {
+        char pci[64] = {0};
+        if (hipDeviceGetPCIBusId(pci, sizeof pci - 1, device_) != hipSuccess) return -1;
+        std::string want;
+        for (const char* p = pci; *p; ++p) want += (char) std::tolower((unsigned char) *p);
+        for (int i = 0; i < 16 && card_vram_.empty(); ++i) {
+            const std::string dir = "/sys/class/drm/card" + std::to_string(i);
+            std::ifstream ue(dir + "/device/uevent");
+            if (!ue) continue;
+            std::string line;
+            while (std::getline(ue, line)) {
+                const std::string key = "PCI_SLOT_NAME=";
+                if (line.compare(0, key.size(), key) != 0) continue;
+                std::string slot = line.substr(key.size());
+                for (char& c : slot) c = (char) std::tolower((unsigned char) c);
+                if (slot == want) card_vram_ = dir + "/device";
+            }
+        }
+        if (card_vram_.empty()) return -1;
+    }
+    std::ifstream t(card_vram_ + "/mem_info_vram_total"), u(card_vram_ + "/mem_info_vram_used");
+    long long total = 0, used = 0;
+    if (!(t >> total) || !(u >> used) || total <= 0) return -1;
+    return (int64_t) ((total - used) >> 20);
+#else
+    return -1;   // CUDA: cudaMemGetInfo already reports what the driver holds for this device
+#endif
+}
+
+
 // M6: what the reservations hold unused (Mapped::free), in MiB -- VRAM the process can map again but
 // hipMemGetInfo does not report.  Reported in the INFO line and the VRAM command, and counted as free by the
 // two places that decide what the caches may hold (fill_expert_cache()'s sizing and mind_card_vram()'s
@@ -1111,7 +1149,15 @@ void Engine::fill_expert_cache() {
     // here.  Without this a resize sizes the cache from the card's leftovers alone: after an 11 GiB cache was
     // given up, free_b was the 12 MiB above the reserve, the map took no piece (hipMemCreate has nothing left
     // while the pool holds it), and the cache came back with 0 experts (.pi/plans/poly-hip/m6-evidence.txt).
-    for (const auto& p : arena_.free) free_b += p.second;
+    size_t pool_bytes = 0;
+    for (const auto& p : arena_.free) pool_bytes += p.second;
+    free_b += pool_bytes;
+    // M26 (opt-in, STRATA_VRAM_FREE_FROM=card): this figure sizes the cache, so read the card's own, where the
+    // desktop's other programs are counted.  hipMemGetInfo counts this process alone on this stack.
+    if (opt_.vram_free_from_card) {
+        const int64_t card = card_free_mib();
+        if (card >= 0) free_b = ((size_t) card << 20) + pool_bytes;
+    }
 #endif
     const size_t ram = ram_available(), files = gg_->bytes() + (dg_ ? dg_->bytes() : 0);
     ram_tight_ = ram > 0 && files + (4ULL << 30) > ram;
@@ -1333,7 +1379,12 @@ bool Engine::mind_card_vram() {
     OnCard here(device_, split_);
     size_t free_b = 0, total_b = 0;
     ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
-    const int64_t free = (int64_t) (free_b >> 20);   // this card's
+    int64_t free = (int64_t) (free_b >> 20);   // this card's
+    // M26: the decisions below read this figure -- with the option on, the card's own, every client counted.
+    if (opt_.vram_free_from_card) {
+        const int64_t card = card_free_mib();
+        if (card >= 0) free = card;
+    }
     if (!vmm_) {   // a cache in one allocation is filled again
         if (free >= reserve_mib_ / 4) return false;
         resize_card_cache(opt_.vram_reserve_mib);

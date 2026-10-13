@@ -601,6 +601,14 @@ curve stops where it is still usable. Measured on this card, the same engine and
 - The card's own reported free is lower again (865 and 990 MiB) because it still counts pages the process has
   retired: the kernel hands those to another program that asks for them, measured in
   `.pi/plans/poly-hip/m13-release-lab.txt`.
+- **The engine can size and monitor from the card's own free-VRAM figure** (`STRATA_VRAM_FREE_FROM=card`, opt-in on
+  HIP), because `hipMemGetInfo` on this stack counts this process alone: with a 2048 MiB Vulkan client holding
+  VRAM it read 4356 MiB free where the card had 1409, and a plan-off load sized on it left the card 786 MiB against
+  the 2560 it promised (`.pi/plans/poly-hip/m25-128k.txt`).  With the option on, the same 128K, 2560 MiB reserve
+  configuration ended a full 129,016-token context with **2613 MiB** on the card against **990 MiB** sized on the
+  runtime figure, at the same read speed (270.0 against 269.8 tok/s at that depth) — and 3026 experts at load
+  against 4045, because that run had 5.5 GiB of desktop VRAM in use against 1.2 GiB (`.pi/plans/poly-hip/m24-128k.txt`,
+  `.pi/plans/poly-hip/m27-128k.txt`).
 - **With `--vram-plan` the engine's monitor no longer resizes the cache between requests**; an explicit
   `VRAM <mib>` (`POST /v1/vram`) is the way to size it down.  A cut on this stack keeps the pieces on M6's free
   list and returns no VRAM to the card, to `hipMemGetInfo` or to the attention caches' next
