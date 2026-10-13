@@ -538,8 +538,49 @@ attempted before the expert cache is cut, and when a cut cannot be avoided the p
 rows need VRAM the driver can hand out again. With `--kv-whole` the attention caches are given the whole context
 at load, so none of this runs.
 
+### A 262,144 context without starving the desktop
+
+The model's own metadata says `qwen35moe.context_length = 262144`, so 256K is a configuration, not a port. The
+problem is the VRAM it needs at that size: the attention caches reach about 6.5 GiB, and on this card that comes
+out of the expert cache — and, without a plan, out of whatever else is using the card.
+
+Measured on this card (RX 9060 XT, ROCm 7.2.4, the same model and profile, `--max-context 262144`,
+`--vram-reserve-mib 3072`, an idle desktop holding 0.5 GiB):
+
+| at 256K | experts in VRAM | card's `mem_info_vram_used` | free on the card (15.92 GiB less that) |
+|---|---|---|---|
+| plain (elastic) | 5,271 (9.4 GiB) | 14.13 GiB | 1.79 GiB, and a long prefill pushed it to 15.52 of 15.92 |
+| `--kv-whole` | 2,235 (4.0 GiB) | 13.63 GiB | 2.29 GiB, flat |
+| `--vram-plan` | 2,215 (3.9 GiB) | **8.78 GiB**, 9.36 after 26,016 prompt tokens | **7.14 GiB**, 6.56 at the end of that run |
+
+The desktop's own share (0.5 GiB idle) is inside the used figures, so the free column is what any program may have.
+
+With `--vram-plan` the cache is the size `--kv-whole` would give it — the worst case is paid for up front — but the
+attention caches' VRAM is only taken as the conversation reaches it, which is why the card sits ~4.5 GiB lower
+while the context is short. Through a conversation that grew to 26,016 prompt tokens the cache stayed at 2,214
+experts and the card climbed by exactly the KV's growth (8.81 → 9.36 GiB), at 764–1,097 tokens/s prefill and 59–73
+tokens/s decode. The cache's steady state between requests is 2,214 experts throughout; a VRAM command
+reshapes it for one fill (2,213 → 1,933 measured) and the next request grows it back (→ 2,214, the engine's own
+growth line in `.pi/plans/poly-hip/m12-vram-plan.txt`). The `INFO` line and the VRAM answer report what is still
+planned as `vram_planned_mib` (5,544 MiB at load in every run above; the per-run figures are in the same file). One
+difference from `--kv-whole` to know about: the plan is a promise, not a claim, so a
+program that takes that VRAM first makes a later long request fail with a mapping error instead of leaving the
+desktop short.
+
+Why the reserve has to be planned rather than topped up later: on this stack, freeing VRAM does not raise the
+driver's free figure while the process lives. Unmapping 2 GiB of the expert cache moved the card's
+`mem_info_vram_used` by nothing (M9 run, `.pi/plans/poly-hip/m9-reserve.txt`); plain `hipFree`,
+`hipFreeAsync`+`hipMemPoolTrimTo`, `hipDeviceReset` and `HSA_DISABLE_FRAGMENT_ALLOCATOR=1` all leave it where it
+was, while a second process that asks for that VRAM gets it (the counter falls by exactly what it took) — all of
+that measured, with the runs and the numbers, in `.pi/plans/poly-hip/m13-release-lab.txt`. So `--vram-reserve-mib` holds
+from load, and the only way to give the card back mid-session is to end the engine: stop the model (the server's
+idle unload, or `POST /v1/unload`) and the card falls from 14.6 GiB to 0.7 GiB.
+
 ### What was not tested
 
+- **A conversation that fills 256K with `--vram-plan`.** The run above reached 26,016 prompt tokens; the plan's own
+  arithmetic is for 262,144. The KV's remaining growth is the number the flag reserves, so nothing new enters the
+  picture before then, but the last of it was not run.
 - **The attention caches' refusal path.** The runs above drive `POST /v1/vram`; a 32,000-token prompt at a
   131,072 context reaches the same code from a real conversation, and was not run here: it takes the engine to
   about 22 GiB of RAM beside the model.

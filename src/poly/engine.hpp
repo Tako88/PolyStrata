@@ -40,6 +40,9 @@ struct Options {
     int max_context = 8192;
     int threads = 0;              ///< 0: the CPUs this process may use
     int vram_reserve_mib = -1;    ///< left free after the expert cache is filled; below 0: by the card's size
+    bool vram_plan = false;       ///< opt-in (HIP): size the expert cache at load for the whole context's attention
+                                  ///< caches, so the reserve above stays free as the conversation grows; false:
+                                  ///< today's load-time sizing
     std::string profile;          ///< expert use counts; orders the expert cache, and save_profile() adds to it
     bool gpu_experts = true;
     bool dump = false;            ///< print a checksum of every stage, for comparing against llama.cpp
@@ -261,6 +264,11 @@ public:
     /// counted as free where this engine decides what the caches may hold: fill_expert_cache()'s sizing and
     /// mind_card_vram()'s growth.  Zero on CUDA.
     int64_t vmm_pool_mib() const;
+    /// What the attention caches still need for the whole context, in MiB, while --vram-plan left it free: the
+    /// live remainder, so it falls as the conversation fills the context (a 0 at full context means the plan is
+    /// spent, not that the flag is off), and 0 with the flag off and on CUDA.  Like vmm_pool_mib(), it reads this
+    /// engine alone: on a --layer-split chain it is the first card's, where vram_free_mib() takes the least of them.
+    int64_t vram_planned_mib() const;
     /// The expert cache sized again, to leave `mib` of VRAM free (below 0: what load() left), and filled with the
     /// experts used most so far.  Without VMM it gets no larger than load() made it.  Between calls that feed
     /// tokens: the experts it gives up are computed on the CPU from then on, as any expert outside it.
@@ -448,6 +456,9 @@ protected:
     void vmm_drop(Mapped& m);   ///< releases what m gave up (HIP: cover()'s retry needs physical VRAM back)
     void shrink_cache(size_t bytes);
     int grow_cache(size_t bytes);
+    /// The attention caches' remaining bytes to the full context: the rows below --max-context that cover() has
+    /// still to map, as load() counts them at its end.
+    size_t kv_planned() const;
     void resize_card_cache(int mib);   ///< resize_cache() and mind_vram() for this engine's card
     bool mind_card_vram();
     void held_is_budget();

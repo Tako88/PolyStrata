@@ -539,14 +539,16 @@ int serve(Session& ss) {
     Engine& engine = ss.engine;
 #if defined(STRATA_USE_HIP)
     // M6: vram_pool_mib is what the reservations hold unused (Mapped::free) -- VRAM the process can map again but
-    // hipMemGetInfo does not report.  The CUDA side keeps today's line, its tokens and its argument list.
+    // hipMemGetInfo does not report.  M7: vram_planned_mib is the attention caches' remaining growth that
+    // --vram-plan left free; 0 off and on CUDA.  The CUDA side keeps today's line, its tokens and its argument list.
     std::printf("INFO context=%d expert_slots=%d expert_cache_mib=%lld pool_workers=%d conversation_cache_mib=%lld "
                 "conversation_cache_slots=%d conversation_cache_min_free_mib=%lld vram_free_mib=%lld "
-                "vram_pool_mib=%lld vram_elastic=1 "
+                "vram_pool_mib=%lld vram_planned_mib=%lld vram_elastic=1 "
                 "engine=" STRATA_VERSION "\n",
                 engine.max_context(), engine.cached_experts(), (long long) (engine.cached_gib() * 1024.0),
                 engine.threads(), (long long) ss.flags.o.park_mib, ss.flags.o.park_slots, ss.flags.min_free_mib,
-                (long long) engine.vram_free_mib(), (long long) engine.vmm_pool_mib());
+                (long long) engine.vram_free_mib(), (long long) engine.vmm_pool_mib(),
+                (long long) engine.vram_planned_mib());
 #else
     std::printf("INFO context=%d expert_slots=%d expert_cache_mib=%lld pool_workers=%d conversation_cache_mib=%lld "
                 "conversation_cache_slots=%d conversation_cache_min_free_mib=%lld vram_free_mib=%lld vram_elastic=1 "
@@ -594,13 +596,16 @@ int serve(Session& ss) {
                              engine.reserve_mib(), before, engine.cached_experts(), engine.full_experts(),
                              engine.cached_gib(), engine.full_gib(), free_mib, ms_since(t0));
 #if defined(STRATA_USE_HIP)
-                // M6: vram_pool_mib, as in the INFO line above.  The CUDA side keeps today's answer, its tokens
-                // and its argument list.
+                // M6: vram_pool_mib, as in the INFO line above.  M7: vram_planned_mib, the remaining plan,
+                // which keeps holding here because the resize is sized the same way.  The CUDA side keeps today's
+                // answer, its tokens and its argument list.
                 std::printf("VRAM reserve_mib=%d expert_slots=%d expert_slots_full=%d expert_cache_mib=%lld "
-                            "expert_cache_full_mib=%lld vram_free_mib=%lld vram_pool_mib=%lld prompt_chunk=%d\n",
+                            "expert_cache_full_mib=%lld vram_free_mib=%lld vram_pool_mib=%lld vram_planned_mib=%lld "
+                            "prompt_chunk=%d\n",
                             engine.reserve_mib(), engine.cached_experts(), engine.full_experts(),
                             (long long) (engine.cached_gib() * 1024.0), (long long) (engine.full_gib() * 1024.0),
-                            free_mib, (long long) engine.vmm_pool_mib(), engine.max_rows());
+                            free_mib, (long long) engine.vmm_pool_mib(), (long long) engine.vram_planned_mib(),
+                            engine.max_rows());
 #else
                 std::printf("VRAM reserve_mib=%d expert_slots=%d expert_slots_full=%d expert_cache_mib=%lld "
                             "expert_cache_full_mib=%lld vram_free_mib=%lld prompt_chunk=%d\n",
@@ -779,6 +784,14 @@ void usage() {
                  "                         as a CUDA graph and replayed)\n"
                  "  --kv-whole             give the attention caches VRAM for the whole context at load (default: as\n"
                  "                         the conversation grows, the expert cache having the rest until then)\n"
+                 "  --vram-plan            size the expert cache for the whole attention context at load, so that\n"
+                 "                         --vram-reserve-mib stays free as the conversation grows: fewer experts\n"
+                 "                         in VRAM from the start, and the engine's own growth never takes them\n"
+                 "                         back between requests (a VRAM command still reshapes the cache for one\n"
+                 "                         fill; the next request restores it).  Pair it with an explicit\n"
+                 "                         --vram-reserve-mib.  With --layer-split and a large --max-context a load\n"
+                 "                         can now refuse where it loaded a smaller cache before: give it a smaller\n"
+                 "                         --max-context or reserve.  HIP only; no effect under --kv-whole\n"
                  "  --expert-swaps N       while an answer is written, up to N experts it keeps using are on their way\n"
                  "                         into VRAM, in place of cached ones it uses less (default 64, 0 = the cache\n"
                  "                         stays as it was loaded)\n"
@@ -857,6 +870,7 @@ int main(int argc, char** argv) {
         else if (a == "--any-node") o.stay_near = false;
         else if (a == "--no-graphs") o.graphs = false;
         else if (a == "--kv-whole") o.kv_grow = false;
+        else if (a == "--vram-plan") o.vram_plan = true;
         else if (a == "--window") o.window = std::atoi(val());
         else if (a == "--lookup") lookup = std::atoi(val());
         else if (a == "--no-draft") o.draft = false;

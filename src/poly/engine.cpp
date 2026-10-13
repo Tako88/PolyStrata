@@ -1071,6 +1071,26 @@ int64_t Engine::vmm_pool_mib() const {
 #endif
 }
 
+// The attention caches' remaining bytes to the full context: the rows below --max-context that cover() has still
+// to map.  The same expression load() counts at the end (the KV the context still needs), and no device call.
+size_t Engine::kv_planned() const {
+    size_t more = 0;
+    for (const Kv& k : kv_) more += k.reserved - k.mapped;
+    return more;
+}
+
+// M7: the attention caches' remaining growth as vram_planned_mib(), in MiB -- what --vram-plan kept out of the
+// expert cache at load.  Zero on CUDA, and zero with the flag off, so the printing sites need no other guard.
+int64_t Engine::vram_planned_mib() const {
+#if defined(STRATA_USE_HIP)
+    // 0 when there is no expert cache to have kept it out of (--no-gpu-experts, n_moe_ == 0): the plan is only
+    // ever a deduction from that cache's budget.
+    return opt_.vram_plan && opt_.gpu_experts ? (int64_t) (kv_planned() >> 20) : 0;
+#else
+    return 0;
+#endif
+}
+
 // Experts go to VRAM by use per byte when there are counts, the profile's and this run's, and otherwise the same
 // number from every layer.
 //
@@ -1099,7 +1119,19 @@ void Engine::fill_expert_cache() {
     reserve_mib_ = opt_.vram_reserve_mib >= 0 ? std::max(opt_.vram_reserve_mib, 256)
                                              : default_reserve_mib(total_b, ram_tight_);
     const size_t reserve = size_t(reserve_mib_) << 20;
+#if defined(STRATA_USE_HIP)
+    // M7: with --vram-plan the reserve and the attention caches' remaining growth to --max-context are the floor.
+    // The cache is sized to leave both free, so a card that cannot hold anything above them takes no expert cache
+    // at all: exp_ stays nullptr, the state the engine already runs with under --no-gpu-experts.  Falling back to
+    // a smaller floor would re-break the floor this flag exists to hold.  This rule is for one card: an engine of
+    // a --layer-split chain, with a large --max-context, can now refuse to load here where it loaded a smaller
+    // cache before (load() throws when split_ && !exp_ and the card has less beside its layers than the default
+    // reserve), and the remedy is a smaller --max-context or reserve.
+    const size_t planned = opt_.vram_plan ? kv_planned() : 0;
+    if (free_b <= reserve + planned) return;
+#else
     if (free_b <= reserve) return;
+#endif
 
     struct Cand {
         int il, e;
@@ -1138,7 +1170,15 @@ void Engine::fill_expert_cache() {
     n_trade_ = (int) sizes.size();
     // sized again (resize_cache()), it is no larger than load() made it, or than its addresses with VMM
     const size_t most = vmm_ ? std::min(all, total_b) : full_bytes_ > 0 ? full_bytes_ : all;
+#if defined(STRATA_USE_HIP)
+    // M7: the plan's floor was checked above, so the subtraction cannot underflow.  A reshape can land a little
+    // smaller for one fill (the live free figure does not recover after vmm_unmap on this stack, M6) and the
+    // engine's own growth puts the cache back on the next request: 2213 -> 1933 at the VRAM command, 1933 -> 2214
+    // on the request after it, measured at --max-context 262144 --vram-reserve-mib 3072 (m12-vram-plan.txt).
+    const size_t arena = std::min({all, free_b - reserve - planned, arena_.base ? arena_.reserved - 256 : most});
+#else
     const size_t arena = std::min({all, free_b - reserve, arena_.base ? arena_.reserved - 256 : most});
+#endif
     if (arena == 0) return;
 #if defined(STRATA_USE_HIP)
     // HIP: whole pieces only (M4b.2), so the arena can hold less than it asked for.  The fill may use only
@@ -1315,7 +1355,11 @@ bool Engine::mind_card_vram() {
     // M6(c): and those pieces are VRAM this engine can map again, so the two decisions below count them as
     // free.  hipMemGetInfo leaves them out, so a full pool reads as "the card is nearly empty": the 2026-10-13
     // session shrank its cache to 0 experts on that reading and never grew it back (m6-evidence.txt).
-    const int64_t usable = free + (int64_t) (spare >> 20);
+    int64_t usable = free + (int64_t) (spare >> 20);
+    // M7: hipMemGetInfo reports the never-mapped planned region as free, so with --vram-plan it is spoken for:
+    // without this the cache grows back into the VRAM the coming tokens need and cover() shrinks it mid-session,
+    // which is exactly what the flag removes.
+    usable = std::max(usable - (opt_.vram_plan ? (int64_t) (kv_planned() >> 20) : 0), (int64_t) 0);
 #else
     const int64_t usable = free;   // the CUDA side reads the card's own figure, as it did
 #endif
