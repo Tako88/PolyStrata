@@ -1342,28 +1342,40 @@ bool Engine::mind_card_vram() {
     if (minds_++ == 0) return false;   // nothing is recorded before the first request
     const int64_t keep = opt_.vram_reserve_mib >= 0 || ram_tight_ ? reserve_mib_ : std::max(reserve_mib_ / 2, 128);
 #if defined(STRATA_USE_HIP)
-    // M6(a): the pieces the arena gave up are still this process's -- the runtime holds them in a pool
-    // hipMemGetInfo cannot see (m6-probe-evidence.txt) -- so growth out of that pool is attempted first, on the
-    // free list alone (the card's own figure is not consulted for it).  grow_cache() maps out of the free list,
-    // one kArenaPiece at a time, and returns 0 when it took no expert; the two free-VRAM decisions below then run
-    // as they did before, with what the attempt did not take.
+    // M6: the pieces the arena gave up are still this process's -- the runtime holds them in a pool
+    // hipMemGetInfo cannot see (m6-probe-evidence.txt) -- and vmm_map() re-maps them before it asks the driver for
+    // more, so the two decisions below count them as free.  hipMemGetInfo leaves them out, so a full pool reads as
+    // "the card is nearly empty": the 2026-10-13 session shrank its cache to 0 experts on that reading and never
+    // grew it back (m6-evidence.txt).
+    //
+    // M8: growth out of that pool alone, by the whole pool and before this arithmetic, was tried here first.  It
+    // is the same VRAM the `usable` figure below counts, so growing into it and the shrink below traded it back and
+    // forth on every request: "4052 -> 2647 -> 4052 experts ... 0 MiB left", 53 times in one session at
+    // --max-context 131072 --vram-reserve-mib 2560 --vram-plan, the card's free figure 0 throughout
+    // (m24-live-oscillation.txt).  Growth is now the one call below: it maps out of the free list first
+    // (vmm_map()) and takes only what the budget allows.
     size_t spare = 0;
     for (const auto& p : arena_.free) spare += p.second;
-    if (spare >= kArenaPiece && grow_cache(spare) > 0) return true;
-    spare = 0;   // the attempt may have mapped pieces and taken no expert: read the list as it is now
-    for (const auto& p : arena_.free) spare += p.second;
-    // M6(c): and those pieces are VRAM this engine can map again, so the two decisions below count them as
-    // free.  hipMemGetInfo leaves them out, so a full pool reads as "the card is nearly empty": the 2026-10-13
-    // session shrank its cache to 0 experts on that reading and never grew it back (m6-evidence.txt).
     int64_t usable = free + (int64_t) (spare >> 20);
     // M7: hipMemGetInfo reports the never-mapped planned region as free, so with --vram-plan it is spoken for:
     // without this the cache grows back into the VRAM the coming tokens need and cover() shrinks it mid-session,
     // which is exactly what the flag removes.
-    usable = std::max(usable - (opt_.vram_plan ? (int64_t) (kv_planned() >> 20) : 0), (int64_t) 0);
+    const int64_t plan = opt_.vram_plan ? (int64_t) (kv_planned() >> 20) : 0;
+    usable = std::max(usable - plan, (int64_t) 0);
 #else
     const int64_t usable = free;   // the CUDA side reads the card's own figure, as it did
 #endif
     if (usable < keep / 2) {
+#if defined(STRATA_USE_HIP)
+        // M8: with --vram-plan the plan already sized this cache to keep the reserve and its own remaining growth
+        // free, so a cut here cannot keep either promise and keeps neither: vmm_unmap() on this stack leaves the
+        // pieces on the pool above, which returns no VRAM to the card, to hipMemGetInfo, or to the attention
+        // caches' next hipMemCreate().  At a live desktop this cut 1405 experts for 2.5 GiB that stayed mapped
+        // either way, and the request after it put the same experts back (m24-live-oscillation.txt).  The plan is
+        // the one authority on how much the cache may hold; VRAM <mib> (POST /v1/vram) is the way to size it down
+        // by hand.
+        if (opt_.vram_plan) return false;
+#endif
         shrink_cache(size_t(keep - usable) << 20);
         held_is_budget();
         return true;

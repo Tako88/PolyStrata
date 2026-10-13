@@ -601,6 +601,12 @@ curve stops where it is still usable. Measured on this card, the same engine and
 - The card's own reported free is lower again (865 and 990 MiB) because it still counts pages the process has
   retired: the kernel hands those to another program that asks for them, measured in
   `.pi/plans/poly-hip/m13-release-lab.txt`.
+- **With `--vram-plan` the engine's monitor no longer resizes the cache between requests**; an explicit
+  `VRAM <mib>` (`POST /v1/vram`) is the way to size it down.  A cut on this stack keeps the pieces on M6's free
+  list and returns no VRAM to the card, to `hipMemGetInfo` or to the attention caches' next
+  `hipMemCreate()`, so the monitor could only evict experts: on 2026-10-13 it cut 1405 of them (2.5 GiB that
+  stayed mapped) on 53 of one session's requests, and the request after each put them back, with the card pinned
+  at 15.2 GiB (`.pi/plans/poly-hip/m24-live-oscillation.txt`).  Growth still draws on the pool, through the same budget.
 
 ### What was not tested
 
