@@ -576,6 +576,32 @@ that measured, with the runs and the numbers, in `.pi/plans/poly-hip/m13-release
 from load, and the only way to give the card back mid-session is to end the engine: stop the model (the server's
 idle unload, or `POST /v1/unload`) and the card falls from 14.6 GiB to 0.7 GiB.
 
+### A 131,072 context, and what the reserve really leaves
+
+Half the context is half the reserved KV, so the plan's expert cache is about twice the 256K one, and the depth
+curve stops where it is still usable. Measured on this card, the same engine and the same ramp, two reserves
+(`--max-context 131072 --tail-skip 6 --vram-plan`, one growing conversation, 8 tokens asked per step):
+
+| reserve | experts in VRAM at load | incremental read at 33K / 66K / 98K / 129K context (tok/s) | decode at those depths (tok/s) | the engine's free VRAM at a full 129,016-token context | the card's reported free |
+|---|---|---|---|---|---|
+| 2048 | 4,326 (7.7 GiB) | 1,051 / 514 / 348 / 270 | 64.8 / 46.0 / 45.8 / 40.3 | 1,062 MiB | 865 MiB |
+| 2560 | 4,045 (7.2 GiB) | 1,045 / 515 / 346 / 270 | 59.6 / 46.3 / 44.4 / 38.8 | 1,574 MiB | 990 MiB |
+
+- The read column is the incremental prefill at that depth, which is what a next turn of a long conversation
+  costs. It is a property of the depth and not of the setting: the 256K run above read at 347.7 and 269.9 tokens/s
+  at 98K and 129K, this one at 346.0 and 269.8.
+- The cache did not move during either ramp (4,326 and 4,045 experts), and `vram_planned_mib` fell to 0 exactly as
+  the attention caches took the VRAM it had reserved.
+- The exchange rate is measured: 512 MiB more reserve cost 281 experts (4,326 less 4,045); 512 / 1.82 MiB per
+  expert = 281.
+- **The reserve needs about a gigabyte of slack.** At a full-length prompt the engine's free VRAM ends 986 MiB
+  below the reserve in both runs (1,062 against 2048, 1,574 against 2560). The plan's floor is the free figure it
+  read at load, and the prompt path's buffers for a 129,000-token prompt are allocated after it, out of that
+  floor. Size the reserve for what the other programs on the card need, plus that gigabyte.
+- The card's own reported free is lower again (865 and 990 MiB) because it still counts pages the process has
+  retired: the kernel hands those to another program that asks for them, measured in
+  `.pi/plans/poly-hip/m13-release-lab.txt`.
+
 ### What was not tested
 
 - **A conversation that fills 256K with `--vram-plan`.** The run above reached 26,016 prompt tokens; the plan's own
