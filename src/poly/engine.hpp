@@ -41,11 +41,14 @@ struct Options {
     int threads = 0;              ///< 0: the CPUs this process may use
     int vram_reserve_mib = -1;    ///< left free after the expert cache is filled; below 0: by the card's size
     bool vram_plan = false;       ///< opt-in (HIP): size the expert cache at load for the whole context's attention
-    bool vram_free_from_card = false; ///< opt-in (HIP, STRATA_VRAM_FREE_FROM=card): read the card's own free VRAM
-                                  ///< where hipMemGetInfo is read today.  On this stack hipMemGetInfo counts this
-                                  ///< process alone -- engine 4356 MiB against a card with 1409 MiB beside a 2048 MiB
-                                  ///< Vulkan client -- and a plan-off load sized on it left the card 786 MiB free
-                                  ///< against a 2560 MiB reserve (.pi/plans/poly-hip/m25-128k.txt).
+    int vram_free_from = -1;      ///< where the free-VRAM figures come from.  -1: the default -- the card's own
+                                  ///< on HIP, hipMemGetInfo's on CUDA.  0: always the runtime's.  1: always the
+                                  ///< card's (STRATA_VRAM_FREE_FROM=runtime|card).  On this stack hipMemGetInfo
+                                  ///< counts this process alone -- engine 4356 MiB against a card with 1409 MiB
+                                  ///< beside a 2048 MiB Vulkan client -- and a plan-off load sized on it left the
+                                  ///< card 786 MiB free against a 2560 MiB reserve (.pi/plans/poly-hip/m25-128k.txt);
+                                  ///< sized on the card, the same ramp ended a full 129016-token context with
+                                  ///< 2613 MiB free against 990 (m27-128k.txt, m24-128k.txt).
                                   ///< caches, so the reserve above stays free as the conversation grows; false:
                                   ///< today's load-time sizing
     std::string profile;          ///< expert use counts; orders the expert cache, and save_profile() adds to it
@@ -265,6 +268,14 @@ public:
     int reserve_mib() const { return reserve_mib_; }
     int64_t vram_free_mib() const;
     int64_t card_free_mib() const; ///< the card's own free VRAM, every client counted; -1 when it cannot be read
+    /// True when the sizing and monitoring figures come from the card itself (Options::vram_free_from).
+    bool free_from_card() const {
+#if defined(STRATA_USE_HIP)
+        return opt_.vram_free_from != 0;
+#else
+        return opt_.vram_free_from == 1;
+#endif
+    }
     /// What the reservations hold unused: the bytes of the pieces vmm_unmap() gave back and that vmm_map() will
     /// re-map (Mapped::free, HIP only), in MiB.  Reported (main.cpp's INFO line and the VRAM command) and
     /// counted as free where this engine decides what the caches may hold: fill_expert_cache()'s sizing and

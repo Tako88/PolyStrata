@@ -1152,9 +1152,10 @@ void Engine::fill_expert_cache() {
     size_t pool_bytes = 0;
     for (const auto& p : arena_.free) pool_bytes += p.second;
     free_b += pool_bytes;
-    // M26 (opt-in, STRATA_VRAM_FREE_FROM=card): this figure sizes the cache, so read the card's own, where the
-    // desktop's other programs are counted.  hipMemGetInfo counts this process alone on this stack.
-    if (opt_.vram_free_from_card) {
+    // M26: this figure sizes the cache, so on HIP it is the card's own, where the desktop's other programs are
+    // counted -- hipMemGetInfo counts this process alone on this stack (STRATA_VRAM_FREE_FROM=runtime for the old
+    // figure).
+    if (free_from_card()) {
         const int64_t card = card_free_mib();
         if (card >= 0) free_b = ((size_t) card << 20) + pool_bytes;
     }
@@ -1380,8 +1381,8 @@ bool Engine::mind_card_vram() {
     size_t free_b = 0, total_b = 0;
     ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
     int64_t free = (int64_t) (free_b >> 20);   // this card's
-    // M26: the decisions below read this figure -- with the option on, the card's own, every client counted.
-    if (opt_.vram_free_from_card) {
+    // M26: the decisions below read this figure -- on HIP, the card's own, every client counted.
+    if (free_from_card()) {
         const int64_t card = card_free_mib();
         if (card >= 0) free = card;
     }
