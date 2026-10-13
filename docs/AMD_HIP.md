@@ -594,10 +594,16 @@ curve stops where it is still usable. Measured on this card, the same engine and
   the attention caches took the VRAM it had reserved.
 - The exchange rate is measured: 512 MiB more reserve cost 281 experts (4,326 less 4,045); 512 / 1.82 MiB per
   expert = 281.
-- **The reserve needs about a gigabyte of slack.** At a full-length prompt the engine's free VRAM ends 986 MiB
-  below the reserve in both runs (1,062 against 2048, 1,574 against 2560). The plan's floor is the free figure it
-  read at load, and the prompt path's buffers for a 129,000-token prompt are allocated after it, out of that
-  floor. Size the reserve for what the other programs on the card need, plus that gigabyte.
+- **With the card's figure the reserve is what the card actually keeps**, measured at a full 129,016-token
+  context twice: 1091 MiB free on the card against a 1024 MiB reserve, and 2613 against 2560 — 50 to 70 MiB above
+  it, the plan's own arithmetic leaving the rest.  The prompt path's buffers for a long prompt come out of that
+  same reservation, so the reserve itself needs no extra slack.  (The gigabyte of slack earlier in this section
+  was measured on the engine's own `hipMemGetInfo` figure, which the sizing no longer reads: that figure counts
+  this process alone and reads about a gigabyte high beside a busy desktop.)
+- **A 1024 MiB reserve was also the faster of the two, at the same machine** (`.pi/plans/poly-hip/m28-128k.txt`):
+  1,029.0 / 512.3 / 348.7 / 270.7 tok/s of read at 33K / 66K / 98K / 129K against 1,016.2 / 482.7 / 330.4 / 270.0
+  at 2560 (M27), with decode 57.9 / 45.4 / 46.0 / 39.5 against 54.2 / 42.5 / 44.0 / 38.9 — the ~740 more experts
+  the smaller reserve buys.
 - The card's own reported free is lower again (865 and 990 MiB) because it still counts pages the process has
   retired: the kernel hands those to another program that asks for them, measured in
   `.pi/plans/poly-hip/m13-release-lab.txt`.
