@@ -1,0 +1,64 @@
+{
+ "gguf": "models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+ "llama_server": "/usr/bin/llama-server",
+ "strata_cfg": "bench/run-rx9060xt-qwen36-llamacpp-b11548/strata-poly-hip.json",
+ "strata_exe": "build-poly-hip/strata-poly",
+ "serve": "serve",
+ "cwd": ".",
+ "configs": [
+  {
+   "name": "polystrata",
+   "kind": "strata",
+   "args": [],
+   "override": {
+    "--max-context": "36864",
+    "--threads": "12",
+    "--conversation-cache-mib": "0",
+    "--prompt-cache": "6",
+    "--tail-skip": "6"
+   }
+  },
+  {
+   "name": "llama",
+   "kind": "llama",
+   "args": [
+    "-ngl",
+    "99",
+    "-c",
+    "36864",
+    "-fa",
+    "on",
+    "-ctk",
+    "q8_0",
+    "-ctv",
+    "q8_0",
+    "-t",
+    "12",
+    "-ncmoe",
+    "16"
+   ]
+  },
+  {
+   "name": "llama-ngram",
+   "kind": "llama",
+   "args": [
+    "-ngl",
+    "99",
+    "-c",
+    "36864",
+    "-fa",
+    "on",
+    "-ctk",
+    "q8_0",
+    "-ctv",
+    "q8_0",
+    "-t",
+    "12",
+    "--spec-type",
+    "ngram-simple",
+    "-ncmoe",
+    "16"
+   ]
+  }
+ ]
+}

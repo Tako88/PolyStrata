@@ -1,0 +1,26 @@
+{
+ "exe": "build-poly-hip/strata-poly",
+ "args": [
+  "--model",
+  "models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+  "--max-context",
+  "36864",
+  "--threads",
+  "12",
+  "--conversation-cache-mib",
+  "0",
+  "--prompt-cache",
+  "6",
+  "--tail-skip",
+  "6",
+  "--expert-profile",
+  "models/packs/qwen36-ud-q4_k_m/expert-profile.txt",
+  "--vram-reserve-mib",
+  "2048"
+ ],
+ "cwd": ".",
+ "tokenizer": "models/packs/qwen36-ud-q4_k_m/tokenizer",
+ "model_name": "qwen3.6-35b-a3b-ud-q4_k_m",
+ "log": "bench/run-rx9060xt-qwen36-llamacpp-b11548/strata-poly-hip.log",
+ "port": 8190
+}
