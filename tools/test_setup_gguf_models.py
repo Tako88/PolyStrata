@@ -100,10 +100,30 @@ class Estimates(unittest.TestCase):
         self.assertIn("fits by setup's estimate (~21 GB of RAM", setup.poly_verdict(d, 32, 8.0, False))
         self.assertIn("read from the SSD", setup.poly_verdict(d, 12, 8.0, False))
         self.assertIn("does not fit", setup.poly_verdict(d, 64, 6.0, False))
-        self.assertIn("AMD", setup.poly_verdict(d, 64, 24.0, True))
+        self.assertIn("AMD", setup.poly_verdict(d, 64, 24.0, True))         # no card named: as before M5
         with mock.patch.object(setup, "WIN", True):     # a family that has run on Windows is not said to be untried
             self.assertIn("not tried on Windows", setup.poly_verdict(d, 32, 8.0, False))
             self.assertNotIn("not tried on Windows", setup.poly_verdict(d, 32, 8.0, False, True))
+
+    def test_the_measured_amd_card(self):
+        """M5 (docs/AMD_HIP.md): the one AMD card this family was measured on is answered for; another, and a model
+        that has not been run on one, get the refusal every AMD card got before."""
+        for size, d in setup.family_models("qwen36").items():
+            self.assertEqual(d["hip_archs"], setup.POLY_HIP_ARCHS, size)
+            self.assertIn("measured on gfx1200 with ROCm 7.2.4",
+                          setup.poly_verdict(d, 64, 24.0, True, arch="gfx1200"))
+            self.assertIn("fits by setup's estimate", setup.poly_verdict(d, 64, 24.0, True, arch="gfx1200"))
+            self.assertTrue(setup.poly_fits(d, 64, 24.0, True, arch="gfx1200"))
+            for other in ("gfx1100", "gfx1101", "gfx1201", None):           # an unmeasured AMD card: refused
+                self.assertIn("AMD", setup.poly_verdict(d, 64, 24.0, True, arch=other))
+                self.assertFalse(setup.poly_fits(d, 64, 24.0, True, arch=other))
+        for family in ("glm", "ornith", "gemma4", "tiel"):                  # not measured on an AMD card
+            for size, d in setup.family_models(family).items():
+                self.assertNotIn("hip_archs", d, f"{family} {size}")
+                self.assertIn("AMD", setup.poly_verdict(d, 64, 24.0, True, arch="gfx1200"))
+                self.assertFalse(setup.poly_fits(d, 64, 24.0, True, arch="gfx1200"))
+        # the reserve setup writes instead of the engine's own default on that card (M4.6's failing server runs)
+        self.assertEqual(setup.POLY_HIP_RESERVE_MIB, 2048)
 
 
 class Config(unittest.TestCase):
@@ -216,6 +236,49 @@ class Main(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("not used with GLM 5.3 Flash", out)
         self.assertNotIn("vision", cfg)
+
+    def test_the_measured_amd_card_is_installed_over_hip(self):
+        """M5: on the one AMD card this family was measured on, setup compiles this checkout's HIP build, writes the
+        measured reserve, and does not offer the parked conversation cache (docs/AMD_HIP.md).  Another AMD card, and
+        every other family, are refused as before."""
+        card = {"index": 0, "name": "AMD Radeon RX 9060 XT", "vram_gb": 15.92, "arch": "gfx1200", "driver": "amdgpu",
+                "vendor": "amd"}
+        self.downloads, self.runs, self.verified = [], [], []
+        code, out, cfg = self.main(["--backend", "hip"], family="qwen36", ram=31.3, vram=15.92, amd=[card])
+        self.assertEqual(code, 0, out)
+        self.assertEqual((self.built, self.built_hip), ([["gfx1200"]], True))
+        args = cfg["args"]
+        self.assertEqual(args[args.index("--vram-reserve-mib") + 1], str(setup.POLY_HIP_RESERVE_MIB))
+        self.assertNotIn("--conversation-cache-mib", args)
+        self.assertIn("conversation cache: off - the parked-conversation cache has not been measured on an AMD card",
+                      out)
+        self.assertIn(f"VRAM kept free for other programs: {setup.POLY_HIP_RESERVE_MIB} MiB", out)
+        # the ready-made engine is never looked for: it is the Windows/CUDA one (get_poly_prebuilt would read the
+        # card's arch as a number)
+        self.assertIn("engine: " + str(self.t / setup.ENGINE_POLY_DIR / setup.POLY_EXE), out)
+        # the same family on an AMD card it was not measured on: refused (the words of the AMD refusal)
+        code, out, cfg = self.main(["--backend", "hip"], family="qwen36", ram=31.3, vram=23.9,
+                                   amd=[{**card, "name": "AMD Radeon RX 7900 XTX", "arch": "gfx1100"}])
+        self.assertNotEqual(code, 0)
+        self.assertIn("has not been measured on gfx1100", out)
+        # and a family that has run on no AMD card at all: the refusal setup had before M5
+        code, out, cfg = self.main(["--backend", "hip"], family="ornith", ram=31.3, vram=15.92, amd=[card])
+        self.assertNotEqual(code, 0)
+        self.assertIn("Ornith 1.5 35B-A3B runs on NVIDIA cards only: its engine is a CUDA program", out)
+        self.assertEqual(self.built, [["gfx1200"]])       # neither refusal compiled anything
+        # images: the AMD build has no GPU encoder, so --vision gpu is off with hip_vision's note and cpu/yes take
+        # the CPU encoder (docs/AMD_HIP.md)
+        code, out, cfg = self.main(["--backend", "hip", "--vision", "gpu"], family="qwen36", ram=31.3, vram=15.92,
+                                   amd=[card])
+        self.assertEqual(code, 0, out)
+        self.assertIn("the AMD backend has no GPU image encoder yet: images off", out)
+        self.assertEqual((self.encoder, cfg.get("vision")), ("none", None))
+        self.verified = []
+        code, out, cfg = self.main(["--backend", "hip", "--vision", "cpu"], family="qwen36", ram=31.3, vram=15.92,
+                                   amd=[card])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.encoder, "cpu")
+        self.assertEqual(cfg["vision"]["gpu"], False)
 
     def test_the_draft_model_beside_files_of_ones_own(self):
         size, file, _repo, _n = NEW["gemma4"]

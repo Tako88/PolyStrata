@@ -52,9 +52,14 @@ times as fast (the two runs are linked there).
 
 ### Does it run on Radeon / AMD?
 
-Not the five added models yet. Their engine is CUDA only, so it needs an NVIDIA card. On a Radeon with 12 GB or
-more, PolyStrata runs Qwen3.8-Flash-Next through Strata's AMD backend. I want AMD support for the other models too,
-but I don't have an AMD card to test on yet.
+Qwen3.6-35B-A3B does, on one card so far. An RX 9060 XT (gfx1200) with ROCm 7.2.4 runs its UD-Q4_K_M file
+through this engine's own HIP build: 1,184 tokens/s on a 2,000-token prompt and 88.5 tokens/s while it writes, at
+an 8K context, and 1,212.5 and 78.6 at 128K with a 20,000-token prompt (medians of three runs). Setup installs it
+- `./setup.sh --backend hip --family qwen36` - and the web app and the OpenAI API work on the card
+([the measurement, its conditions and what was not tested](AMD_HIP.md#qwen36-35b-a3b-on-an-rx-9060-xt-gfx1200-the-strata-poly-engine)).
+The engine's other four models (GLM 5.3 Flash, Ornith 1.5, Gemma 4 26B-A4B, Tiel Coder) and every other AMD card
+are refused for now: nothing of theirs has been run on one. On a Radeon with 12 GB or more, PolyStrata also runs
+Qwen3.8-Flash-Next through Strata's AMD backend.
 
 ### Will it run on a 6 GB card, or 4 GB?
 

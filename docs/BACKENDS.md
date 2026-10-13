@@ -76,6 +76,13 @@ model. `--gguf-dir /folder/with/the/file` takes a file you already have; a draft
 downloaded to setup's own. The engine is compiled once for all of them. On the test machine, with the files on the
 disk, the first install took a minute, most of it the compile, and the other two 17 seconds each.
 
+On an AMD card this engine has a HIP build and setup compiles it there (`./setup.sh --backend hip`), for
+Qwen3.6-35B-A3B alone: the other families and every AMD card but the measured one are refused, because nothing of
+theirs was run on one. Two of the steps differ there - it does not offer the parked-conversation cache (never
+measured with the engine on an AMD card) and it writes `--vram-reserve-mib 2048`, the reserve the measured server
+runs needed at a long context. The numbers, the conditions and what was not tested:
+[AMD_HIP.md](AMD_HIP.md#qwen36-35b-a3b-on-an-rx-9060-xt-gfx1200-the-strata-poly-engine).
+
 On Windows the three are installed the same way, with `START-HERE.bat` or `python setup.py` in place of
 `./setup.sh`. There setup downloads `strata-poly` and its image encoder ready-made from the latest release when that
 release was built from the same source (`tools/make_poly_release.py`: RTX 20 to RTX 50 cards, CUDA 13.0, ggml's
@@ -1880,8 +1887,13 @@ Setup knows the files in the table above. Another file of one of these architect
 
 ## Limits
 
-- NVIDIA cards only. Built and run on one Linux machine, and the three new models' nine sizes on one Windows
-  laptop as well. GLM 5.3 Flash was not run on Windows. Two cards can share a model since 2026-10-11
+- NVIDIA cards, and one AMD card for one model: Qwen3.6-35B-A3B UD-Q4_K_M on an RX 9060 XT (gfx1200,
+  ROCm 7.2.4) through this source's own HIP build - 1,212.5 tok/s on a 20,000-token prompt and 78.6 tok/s while it
+  writes at a 128K context, 1,184.0 and 88.5 at an 8K context with 2,000 tokens, medians of three runs; setup
+  compiles it there and refuses every other AMD card and every other model of this engine on AMD
+  ([AMD_HIP.md](AMD_HIP.md#qwen36-35b-a3b-on-an-rx-9060-xt-gfx1200-the-strata-poly-engine)). Built and run on one
+  Linux machine, and the three new models' nine sizes on one Windows laptop as well. GLM 5.3 Flash was not run on
+  Windows. Two cards can share a model since 2026-10-11
   ([MULTI_GPU.md](MULTI_GPU.md#the-strata-poly-models)); that ran with Qwen3.6 and Gemma 4 on two RTX 3080
   under Linux only.
 - The changes that came from the laptop were built on Windows first, and on Linux on 2026-10-10 (gcc 11.4,

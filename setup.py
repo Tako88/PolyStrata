@@ -299,6 +299,17 @@ UNSLOTH_RAM_LEFT_GB = 24        # RAM beside the budget: the OS, the engine, and
 # 204800 (200K) sits between 128K and 256K: it is inside the trained 262144, so it needs no rope scaling and
 # costs ~2.8 GB of 8-bit KV with IQ3_S (vs ~3.6 GB at 256K) - a middle step for PCs that cannot hold 256K.
 CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]
+# The AMD cards the strata-poly engine has been measured on, as the "hip_archs" of the sizes of the family that was
+# (docs/AMD_HIP.md): an AMD card outside this list is refused exactly as every AMD card is refused today.  M4/M5
+# measured Qwen3.6-35B-A3B UD-Q4_K_M on an RX 9060 XT (gfx1200), ROCm 7.2.4, one card, in this checkout's own HIP
+# build; the other sizes of that family and every other family are unmeasured there.
+POLY_HIP_ARCHS = ("gfx1200",)
+# The VRAM setup keeps free on that card.  The engine's own default is a thirty-second of the card (509 MiB here) and
+# the attention cache could not grow at a 36864 context with it: three rounds failed with "no VRAM for the attention
+# cache (4 MiB more)" (bench/run-rx9060xt-qwen36-llamacpp-b11548/README.md, raw/errors.log).  2048 MiB is the reserve
+# the measured server runs used and 1024 MiB what the 128k command-line runs used; it costs the expert cache 5831
+# experts (10.4 GiB) against 6674 (11.9 GiB) with the default at that context.
+POLY_HIP_RESERVE_MIB = 2048
 # The model families: the same architecture, weights in the same three GSQ-RCO sizes, different files.
 FAMILIES = {
     "qwen": {"title": "Qwen3.8-Flash-Next", "by": "Qwen; GSQ-RCO quants by ISTA-DASLab",
@@ -379,13 +390,16 @@ FAMILIES = {
                "vision_gb": 0.9, "vision_vram_gb": 1.6,
                "models": {"UD-Q3_K_M": {"about": "3-bit experts (Unsloth Dynamic), its draft block in the file",
                                         "download_gb": 17.1, "ram_gb": 21, "arena_gb": 14.6,
-                                        "vram_beside_gb": 4.8, "draft": "own"},
+                                        "vram_beside_gb": 4.8, "draft": "own",
+                                        "hip_archs": POLY_HIP_ARCHS},
                           "UD-Q2_K_XL": {"about": "2- and 3-bit i-quant experts (Unsloth Dynamic): the least RAM",
                                          "download_gb": 12.6, "ram_gb": 17, "arena_gb": 10.8,
-                                         "vram_beside_gb": 4.2, "draft": "own"},
+                                         "vram_beside_gb": 4.2, "draft": "own",
+                                         "hip_archs": POLY_HIP_ARCHS},
                           "UD-Q4_K_M": {"about": "4-bit experts (Unsloth Dynamic), 5- and 6-bit where they write",
                                         "download_gb": 22.7, "ram_gb": 27, "arena_gb": 20.1,
-                                        "vram_beside_gb": 4.7, "draft": "own"}},
+                                        "vram_beside_gb": 4.7, "draft": "own",
+                                        "hip_archs": POLY_HIP_ARCHS}},   # the size M4/M5 measured; see POLY_HIP_ARCHS
                "sha256": {"Qwen3.6-35B-A3B-UD-Q3_K_M.gguf":
                           (17104402720, "8966dd0cd8c543c4228490a2a8b0e0814fc4f1e6a8e199ceed4de6754ae7b8e1"),
                           "Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf":
@@ -5054,20 +5068,27 @@ def poly_ram_need(d, vram_gb) -> float:
     return d["arena_gb"] - poly_held_gb(d, vram_gb) + POLY_RAM_BESIDE_GB
 
 
-def poly_fits(d, ram, vram_gb, hip) -> bool:
-    """Whether a size of strata-poly's models runs on this PC with its experts in RAM, by setup's estimate."""
-    return not hip and vram_gb >= poly_beside_gb(d) + 2 and ram >= poly_ram_need(d, vram_gb) - 4
+def poly_fits(d, ram, vram_gb, hip, arch=None) -> bool:
+    """Whether a size of strata-poly's models runs on this PC with its experts in RAM, by setup's estimate.  On AMD
+    (hip) only where `arch` is a card this size has been measured on ("hip_archs"; docs/AMD_HIP.md)."""
+    if hip and arch not in d.get("hip_archs", ()):
+        return False
+    return vram_gb >= poly_beside_gb(d) + 2 and ram >= poly_ram_need(d, vram_gb) - 4
 
 
-def poly_verdict(d, ram, vram_gb, hip, windows=False) -> str:
-    """--check's line for a size of strata-poly's models.  `windows`: its family has run there (FAMILIES)."""
-    if hip:
+def poly_verdict(d, ram, vram_gb, hip, windows=False, arch=None) -> str:
+    """--check's line for a size of strata-poly's models.  `windows`: its family has run there (FAMILIES).  `arch`:
+    this PC's AMD card, when the backend is HIP.  Anything but a measured card gets the refusal every AMD card got
+    before the AMD build existed; a measured one names the build the numbers come from (docs/AMD_HIP.md)."""
+    if hip and arch not in d.get("hip_archs", ()):
         return "does not run on AMD cards (its engine is a CUDA program)"
     if vram_gb < poly_beside_gb(d) + 2:
         return f"does not fit: it takes about {poly_beside_gb(d)} GB of VRAM before any expert"
     need = poly_ram_need(d, vram_gb)
-    return "EXPERIMENTAL, " + ("not tried on Windows, " if WIN and not windows else "") + (
-        f"fits by setup's estimate (~{need:.0f} GB of RAM on this card)" if poly_fits(d, ram, vram_gb, hip) else
+    return "EXPERIMENTAL, " + (f"measured on {arch} with ROCm 7.2.4 (docs/AMD_HIP.md), " if hip else "") + (
+        "not tried on Windows, " if WIN and not windows else "") + (
+        f"fits by setup's estimate (~{need:.0f} GB of RAM on this card)"
+        if poly_fits(d, ram, vram_gb, hip, arch) else
         f"wants ~{need:.0f} GB of RAM on this card: with {ram:.0f} its experts are read from the SSD")
 
 
@@ -5151,12 +5172,15 @@ def get_poly_prebuilt(gpu) -> bool:
     return True
 
 
-def build_engine_poly(gpu, yes, llama, vision="none", toolkit=13) -> Path:
+def build_engine_poly(gpu, yes, llama, vision="none", toolkit=13, hip=False) -> Path:
     """Compile strata-poly for this GPU and, for images, the encoder beside it ("gpu": with CUDA, "cpu": without);
     the results go to engine-poly/.  Each is compiled again when its source changed (a `git pull`); the engine also
     when the card is one it has no code for, and the encoder when it is wanted on the GPU and was built without.
     toolkit 12 (--cuda 12): with a CUDA 12.x toolkit, for a driver older than CUDA 13's or a Pascal / Volta card;
-    both are compiled again when the ones there were built with the other toolkit."""
+    both are compiled again when the ones there were built with the other toolkit.  hip: an AMD card - this
+    checkout's source compiled as HIP instead (build_engine_poly_hip); no NVIDIA toolkit is looked for."""
+    if hip:
+        return build_engine_poly_hip(gpu, llama, vision)
     eng = ROOT / ENGINE_POLY_DIR
     eng.mkdir(exist_ok=True)
     stamp = eng / "BUILD.json"
@@ -5215,13 +5239,76 @@ def build_engine_poly(gpu, yes, llama, vision="none", toolkit=13) -> Path:
     return eng
 
 
+def build_engine_poly_hip(gpu, llama, vision="none") -> Path:
+    """Compile this checkout's strata-poly for an AMD card into engine-poly/, the way build_engine_hip() compiles the
+    first engine: STRATA_POLY_HIP=ON with the card's own architecture and ROCm's device library, which ROCm 7.2 keeps
+    in <root>/amdgcn/bitcode, not <root>/lib/llvm/amdgcn/bitcode (the plan's M0 deviation).  gpu["archs"] (else
+    gpu["arch"]) are "gfx..." strings.  Linux only and from this source: the ready-made strata-poly is Windows/CUDA.
+    vision "cpu": the same CPU image encoder the first engine builds (#304); there is no HIP (GPU) encoder build."""
+    if WIN:
+        fail("the AMD build of strata-poly is Linux-only for now (docs/AMD_HIP.md)",
+             "set this model up on Linux, or on an NVIDIA card")
+    eng = ROOT / ENGINE_POLY_DIR
+    eng.mkdir(exist_ok=True)
+    stamp = eng / "BUILD.json"
+    meta = json.loads(stamp.read_text(encoding="utf-8")) if stamp.exists() else {}
+    src, vsrc = source_hash(ENGINE_SOURCES), source_hash(VISION_SOURCES)
+    archs = sorted({str(x) for x in (gpu.get("archs") or [gpu["arch"]])})
+    engine_ok = (meta.get("backend") == "hip" and (eng / POLY_EXE).exists() and meta.get("src") == src
+                 and set(archs) <= {str(x) for x in meta.get("archs", [])})
+    # a CUDA encoder does not run on this PC: one built for the CPU is what is kept
+    vision_ok = vision == "none" or ((eng / VEXE).exists() and meta.get("vision_src") == vsrc
+                                     and meta.get("vision") == "cpu")
+    if engine_ok and vision_ok:
+        ok("strata-poly already built for this AMD card")
+        return eng
+    if not (shutil.which("c++") or shutil.which("g++")) or not shutil.which("git"):
+        fail("a C++ compiler and git are needed to compile the AMD engine",
+             "Ubuntu/Debian: sudo apt install build-essential git   Fedora: sudo dnf install gcc-c++ git")
+    root, dirs = rocm_root(archs)
+    libs = [str(Path(d).parent) for d in dirs[1:]]
+    bitcode = next((p for p in (root / "lib" / "llvm" / "amdgcn" / "bitcode", root / "amdgcn" / "bitcode") if p.is_dir()),
+                   root / "amdgcn" / "bitcode")
+    os.environ.update({"HIP_PLATFORM": "amd", "HIP_COMPILER": "clang", "HIP_RUNTIME": "rocclr", "ROCM_PATH": str(root),
+                       "HIP_PATH": str(root)})
+    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(dirs + [os.environ.get("LD_LIBRARY_PATH", "")]).rstrip(os.pathsep)
+    os.environ["PATH"] = os.pathsep.join([str(root / "bin"), str(root / "llvm" / "bin"), os.environ.get("PATH", "")])
+    say("  strata-poly's engine is up to date: compiling its image encoder for the CPU ..." if engine_ok else
+        f"  Compiling the strata-poly engine for your AMD GPU{'s' if len(archs) > 1 else ''} "
+        f"({', '.join(archs)}; 10-20 minutes, once) ...")
+    cmake_build(ROOT, ROOT / "build-poly-hip", "strata-poly",
+                ["-DSTRATA_ENABLE_HIP=ON", "-DSTRATA_ENABLE_CUDA=OFF", "-DSTRATA_POLY_HIP=ON",
+                 "-DSTRATA_PREFILL_MMQ=ON", "-DSTRATA_BUILD_TESTS=OFF",
+                 "-DCMAKE_HIP_ARCHITECTURES=" + ";".join(archs),
+                 f"-DCMAKE_HIP_COMPILER={root / 'llvm' / 'bin' / 'clang++'}", f"-DCMAKE_HIP_COMPILER_ROCM_ROOT={root}",
+                 "-DCMAKE_PREFIX_PATH=" + ";".join([str(root), *libs]),
+                 f"-DCMAKE_HIP_FLAGS=--rocm-path={root} --rocm-device-lib-path={bitcode}",
+                 f"-DSTRATA_GGML_DIR={llama}"], None, "")
+    shutil.copy2(ROOT / "build-poly-hip" / POLY_EXE, eng / POLY_EXE)
+    meta = {"source": "local-hip", "backend": "hip", "version": source_version(), "archs": archs,
+            "lib_dirs": dirs, "src": src, "vision": meta.get("vision") or "none",
+            "vision_src": meta.get("vision_src")}
+    if vision != "none":
+        say("  Compiling the image encoder ...")
+        vdir = ROOT / "build-vision-poly"
+        cmake_build(ROOT / "tools" / "vision", vdir, "strata-vision",
+                    [f"-DLLAMA_DIR={llama}", "-DSTRATA_VISION_CUDA=OFF"], None, "")
+        shutil.copy2(vdir / "bin" / VEXE, eng / VEXE)
+        meta = {**meta, "vision": "cpu", "vision_src": vsrc}
+    stamp.write_text(json.dumps(meta, indent=1))
+    ok(f"strata-poly compiled: {eng / POLY_EXE}" + (f", image encoder: {eng / VEXE}" if vision != "none" else ""))
+    return eng
+
+
 def update_poly_engine(cfg: dict, yes=False, cfg_path: Path | None = None) -> None:
     """Before a model of strata-poly starts: the engine setup installed is replaced when its source changed (a `git
     pull`) or the card is another generation, a ready-made one by the release's for the new source, one compiled here
     by a compile.  A ready-made one stays while no release has the new source: a compile would first install the
     build tools.  A failure must not stop the start: the installed one runs.  An install from before the engine was
     renamed has the old engine in its config: the engine is compiled under its new name and, with cfg_path, the
-    config is moved to it."""
+    config is moved to it.  An AMD engine ("backend": "hip") is resolved through HIP's own cards, not nvidia-smi's,
+    and is compiled here again when its source changed: no NVIDIA card is looked for and no CUDA engine is fetched
+    over it, on the AMD-only and on the mixed PC alike (docs/AMD_HIP.md)."""
     eng = Path(cfg["exe"]).parent
     renamed = eng == ROOT / OLD_ENGINE_POLY_DIR and Path(cfg["exe"]).name == OLD_POLY_EXE
     if renamed:
@@ -5231,26 +5318,44 @@ def update_poly_engine(cfg: dict, yes=False, cfg_path: Path | None = None) -> No
         return
     try:
         meta = json.loads(stamp.read_text()) if stamp.exists() else {}
-        picks = cfg["gpu"] if isinstance(cfg.get("gpu"), list) else [cfg["gpu"] if isinstance(cfg.get("gpu"), int) else None]
-        gpu = gpu_info(picks[0])
-        if gpu is None:
-            raise RuntimeError("no NVIDIA GPU found")
-        gpu["archs"] = sorted({int(gpu_info(i)["arch"]) for i in picks})   # a layer split's cards
-        # the encoder too, when this model has one: on the device it was built for
-        vis = cfg.get("vision")
-        vision = ("gpu" if meta.get("vision") == "gpu" or vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none"
         changed = renamed
-        fits = set(gpu["archs"]) <= {int(x) for x in meta.get("archs", [])}
-        if not (meta.get("src") == source_hash(ENGINE_SOURCES) and (eng / POLY_EXE).exists() and fits
-                and (vision == "none" or meta.get("vision_src") == source_hash(VISION_SOURCES))):
-            # one compiled here (--build, a CPU without AVX2) stays so
-            if meta.get("source") == "release" and not get_poly_prebuilt(gpu) and fits:
-                warn("the latest release has no ready-made strata-poly of this source: the one installed starts "
-                     "(START-HERE.bat --setup --build compiles this source)")
+        if meta.get("backend") == "hip":               # AMD: the cards are HIP's numbering, not nvidia-smi's
+            cards = [g for g in hip_config_cards(cfg.get("gpu")) if g]   # no "gpu": the card setup would pick
+            if not cards:                              # no AMD card here: the installed one is all there is to start
+                warn("could not update strata-poly (no AMD GPU found): starting the installed one")
                 return
-            build_engine_poly(gpu, yes, get_llama_cpp(), vision, int(meta.get("toolkit", 13)))
-            # a ready-made engine loads CUDA from pip, one compiled here from the toolkit it was compiled with
-            cfg["lib_dirs"], changed = engine_lib_dirs(eng), True
+            gpu = {**cards[0], "archs": sorted({str(g["arch"]) for g in cards})}   # a layer split's cards
+            # the encoder too: the AMD build's is the CPU one, there is no HIP encoder (docs/AMD_HIP.md)
+            vis = cfg.get("vision")
+            vision = "cpu" if isinstance(vis, dict) or meta.get("vision") == "cpu" else "none"
+            src, vsrc = source_hash(ENGINE_SOURCES), source_hash(VISION_SOURCES)
+            if not (meta.get("src") == src and (eng / POLY_EXE).exists()
+                    and set(gpu["archs"]) <= {str(x) for x in meta.get("archs", [])}
+                    and (vision == "none" or ((eng / VEXE).exists() and meta.get("vision") == "cpu"
+                                              and meta.get("vision_src") == vsrc))):
+                # a ready-made AMD engine is Windows/CUDA and the first engine's: this source is compiled here again
+                build_engine_poly(gpu, yes, get_llama_cpp(), vision, hip=True)
+                cfg["lib_dirs"], changed = engine_lib_dirs(eng), True
+        else:
+            picks = cfg["gpu"] if isinstance(cfg.get("gpu"), list) else [cfg["gpu"] if isinstance(cfg.get("gpu"), int) else None]
+            gpu = gpu_info(picks[0])
+            if gpu is None:
+                raise RuntimeError("no NVIDIA GPU found")
+            gpu["archs"] = sorted({int(gpu_info(i)["arch"]) for i in picks})   # a layer split's cards
+            # the encoder too, when this model has one: on the device it was built for
+            vis = cfg.get("vision")
+            vision = ("gpu" if meta.get("vision") == "gpu" or vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none"
+            fits = set(gpu["archs"]) <= {int(x) for x in meta.get("archs", [])}
+            if not (meta.get("src") == source_hash(ENGINE_SOURCES) and (eng / POLY_EXE).exists() and fits
+                    and (vision == "none" or meta.get("vision_src") == source_hash(VISION_SOURCES))):
+                # one compiled here (--build, a CPU without AVX2) stays so
+                if meta.get("source") == "release" and not get_poly_prebuilt(gpu) and fits:
+                    warn("the latest release has no ready-made strata-poly of this source: the one installed starts "
+                         "(START-HERE.bat --setup --build compiles this source)")
+                    return
+                build_engine_poly(gpu, yes, get_llama_cpp(), vision, int(meta.get("toolkit", 13)))
+                # a ready-made engine loads CUDA from pip, one compiled here from the toolkit it was compiled with
+                cfg["lib_dirs"], changed = engine_lib_dirs(eng), True
         if changed:
             cfg["exe"] = str(eng / POLY_EXE)
             if cfg_path is not None:
@@ -5283,8 +5388,15 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     fam = FAMILIES[family]
     title = fam["title"]
     if hip:
-        fail(f"{title} runs on NVIDIA cards only: its engine is a CUDA program",
-             "choose another model for the AMD card")
+        # The AMD card(s) this family's engine has been measured on, per size ("hip_archs"; docs/AMD_HIP.md).  A
+        # family with none of them, and a card outside them, is refused with the words and the hint an unmeasured
+        # AMD PC has always seen: setup builds on this card only what the numbers were measured with.
+        measured = sorted({x for d in family_models(family).values() for x in d.get("hip_archs", ())})
+        if gpu.get("arch") not in measured:
+            fail(f"{title} runs on NVIDIA cards only: its engine is a CUDA program" if not measured else
+                 f"{title} has not been measured on {gpu.get('arch')}: this engine's AMD build has run on "
+                 + ", ".join(measured) + " only",
+                 "choose another model for the AMD card")
     if cuda_tk == 12:
         warn(f"{title}'s engine with CUDA 12 is compiled here (the ready-made one is CUDA 13)" +
              (": on Pascal / Volta it is untested" if int(gpu["arch"]) < CUDA13_MIN_ARCH else ""))
@@ -5326,8 +5438,13 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     vision = "none"
     if sees:
         auto = "gpu" if vram >= POLY_VISION_GPU_GB else "cpu"
+        if hip:                                        # the AMD build has no GPU image encoder build (docs/AMD_HIP.md)
+            auto = hip_vision("cpu")                   # the CPU one, on Linux; on Windows the note and images off
         if a.vision:
-            vision = {"yes": auto, "no": "none"}.get(a.vision, a.vision)
+            if hip and a.vision == "gpu":               # asked for the GPU's encoder: off, and hip_vision says why
+                vision = hip_vision("gpu")
+            else:
+                vision = {"yes": auto, "no": "none"}.get(a.vision, a.vision)
         else:
             say()
             say(f"  Images: the model can also read pictures (screenshots, photos, scanned pages). This adds a "
@@ -5396,13 +5513,22 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     conv = poly_saved_conv([cfg_path, adopted if adopted is not None and adopted.name == cfg_path.name else None])
     if conv is None:
-        say()
-        say("  Conversation cache: a coding agent sends several conversations in turn (the main one, its subagents,")
-        say("  short side requests). With the cache, one that makes room for another is kept in RAM and comes back")
-        say(f"  without being read again. It takes what it holds, up to {POLY_CONV_CACHE_MIB // 1024} GB of RAM.")
-        room = ram >= need_ram + POLY_CONV_CACHE_MIB / 1024
-        conv = POLY_CONV_CACHE_MIB if ask("Keep several conversations in RAM?", ["y", "n"], "y" if room else "n",
-                                         a.yes) == "y" else 0
+        if hip:
+            # The parked cache has never been measured with the AMD build (docs/AMD_HIP.md): the measured runs all
+            # kept --conversation-cache-mib 0, and it is the one option that adds RAM a 31 GB PC was already tight
+            # on, so it is not offered here.  0 is what the config then carries, as the measured runs had it.
+            conv = 0
+            say()
+            warn(f"conversation cache: off - the parked-conversation cache has not been measured on an AMD card; "
+                 f"--conversation-cache-mib {POLY_CONV_CACHE_MIB} turns it on yourself (the measured runs kept it 0)")
+        else:
+            say()
+            say("  Conversation cache: a coding agent sends several conversations in turn (the main one, its subagents,")
+            say("  short side requests). With the cache, one that makes room for another is kept in RAM and comes back")
+            say(f"  without being read again. It takes what it holds, up to {POLY_CONV_CACHE_MIB // 1024} GB of RAM.")
+            room = ram >= need_ram + POLY_CONV_CACHE_MIB / 1024
+            conv = POLY_CONV_CACHE_MIB if ask("Keep several conversations in RAM?", ["y", "n"], "y" if room else "n",
+                                             a.yes) == "y" else 0
     ok("conversation cache: " + (f"up to {conv} MiB of RAM" if conv else "off (the last conversation is kept)"))
 
     # one file, or the numbered files of a split GGUF: the engine is given the first and finds the others by name
@@ -5449,9 +5575,9 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     step(4, "the strata-poly engine")
     llama = get_llama_cpp()
     ok(f"llama.cpp {LLAMA_CPP_COMMIT[:7]} (gguf-py, ggml)")
-    if not a.build and cuda_tk != 12:
-        get_poly_prebuilt(gpu)
-    eng = build_engine_poly(gpu, a.yes, llama, vision, cuda_tk)
+    if not a.build and cuda_tk != 12 and not hip:
+        get_poly_prebuilt(gpu)                         # the ready-made engine is Windows/CUDA only: a HIP build is this source
+    eng = build_engine_poly(gpu, a.yes, llama, vision, cuda_tk, hip=hip)
     lib_dirs = engine_lib_dirs(eng)
     ok(f"engine: {eng / POLY_EXE}")
 
@@ -5519,6 +5645,17 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         args += ["--vram-reserve-mib", str(a.vram_reserve_mib)]
         ok(f"VRAM kept free for other programs: {a.vram_reserve_mib} MiB (--vram-reserve-mib; the expert cache takes "
            "that much less)")
+    elif hip:
+        # An explicit --vram-reserve-mib wins.  Without one, the engine's own default is a thirty-second of the card
+        # (509 MiB here), and at that the attention cache could not grow at a 36864 context: M4.6's three server
+        # requests failed with "no VRAM for the attention cache (4 MiB more)" and the same benchmark at 2048 had no
+        # error (bench/run-rx9060xt-qwen36-llamacpp-b11548/README.md).  The 128K command-line runs used 1024.  2048
+        # is the reserve the measured server runs needed; a smaller one leaves the attention cache less room and the
+        # expert cache more experts.
+        args += ["--vram-reserve-mib", str(POLY_HIP_RESERVE_MIB)]
+        ok(f"VRAM kept free for other programs: {POLY_HIP_RESERVE_MIB} MiB (the measured AMD default: the attention "
+           "cache needs room to grow at a long context, and the expert cache takes that much less - --vram-reserve-mib "
+           "changes it)")
     if fam.get("tail_skip"):
         args += ["--tail-skip", str(fam["tail_skip"])]
     # The engine's own count is every logical CPU.  On a hybrid CPU that is the slowest: an efficiency core runs
@@ -5974,7 +6111,7 @@ def main() -> int:
         for m, d in MODELS.items():
             verdict = "fits" if ram >= d["ram_gb"] else "tight" if ram >= d["ram_gb"] - 8 else "does not fit"
             if "glm" in d.get("families", ()):
-                verdict = poly_verdict(d, ram, gpu["vram_gb"], hip)
+                verdict = poly_verdict(d, ram, gpu["vram_gb"], hip, arch=gpu.get("arch"))
             elif d.get("budget"):
                 verdict = (("EXPERIMENTAL, " if d.get("experimental") else "") +
                            f"fits with {resident_budget_gib(m, ram)} GiB of its experts in RAM, the rest "
@@ -5989,8 +6126,9 @@ def main() -> int:
             say(f"  {m:8s} needs ~{d['ram_gb']} GB RAM: {verdict}")
         for f, fd in FAMILIES.items():                  # the families with sizes of their own
             for m, d in fd.get("models", {}).items():
-                any_fits = any_fits or poly_fits(d, ram, gpu["vram_gb"], hip)
-                say(f"  {fd['title']} {m}: {poly_verdict(d, ram, gpu['vram_gb'], hip, bool(fd.get('windows')))}")
+                any_fits = any_fits or poly_fits(d, ram, gpu["vram_gb"], hip, gpu.get("arch"))
+                say(f"  {fd['title']} {m}: "
+                    + poly_verdict(d, ram, gpu["vram_gb"], hip, bool(fd.get("windows")), gpu.get("arch")))
         if not any_fits:
             # #977: every size says "does not fit", so the verdict says so too (and the exit code, for scripts). It only
             # reports: --model NAME --yes still installs one anyway.

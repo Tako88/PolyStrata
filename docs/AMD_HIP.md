@@ -7,7 +7,9 @@ RX 9070 / 9070 XT / Radeon AI PRO R9700 (RDNA4, gfx1201; see [RDNA4](#rdna4-gfx1
 cards](#community-validated-cards)); the RX 6800 / 6900 series (RDNA2, gfx1030) builds and runs too, reported by a community machine and not yet validated by the maintainers (see [RDNA2](#rdna2-gfx1030)). Setup chooses it by itself on a PC with no NVIDIA card PolyStrata can use (`--backend hip` on a PC with both); the
 install steps for users are in [INSTALL.md](INSTALL.md#amd-cards). gfx906 (Instinct MI50 / MI60, Radeon VII; wave64) has a separate
 opt-in build, see [gfx906](#gfx906-instinct-mi50--mi60-radeon-vii-wave64-built-from-source). The Ryzen AI Max "Strix Halo" APU (gfx1151, RDNA3.5, unified memory) is built from source on Linux: see [STRIX_HALO.md](STRIX_HALO.md). Other AMD architectures and mixed
-AMD/NVIDIA execution in one run are not supported.
+AMD/NVIDIA execution in one run are not supported. The second engine, the one that reads a GGUF in place
+(Qwen3.6-35B-A3B and the four models beside it), also builds and runs here, measured on an RX 9060 XT:
+[Qwen3.6-35B-A3B on an RX 9060 XT](#qwen36-35b-a3b-on-an-rx-9060-xt-gfx1200-the-strata-poly-engine).
 
 The backend maps the CUDA-shaped runtime and BLAS calls to HIP/hipBLAS, uses
 RDNA2/RDNA3/RDNA4's signed integer dot instruction for quantized kernels, and supplies
@@ -397,6 +399,136 @@ and compare the prompt speed with and without it).
   | 2,374 tokens | 597-599 tok/s | 396-398 tok/s | 1.50x |
   | 65,045 tokens | 754-757 tok/s | 380 tok/s | 1.99x |
   | 130,091 tokens (the same flags) | 719 tok/s | 363-370 tok/s | 1.98x |
+
+## Qwen3.6-35B-A3B on an RX 9060 XT (gfx1200): the `strata-poly` engine
+
+The second engine, the one that reads a GGUF in place ([the five models](BACKENDS.md#what-runs)), is this same
+source compiled with `-DSTRATA_POLY_HIP=ON`, and it has run on this card. What has been measured there is one
+model on one card, **Qwen3.6-35B-A3B UD-Q4_K_M**, and everything below is that measurement - the medians of three
+runs on a quiet machine, or one benchmark through the server. Setup compiles it there and refuses every other AMD
+card and every other model of this engine on AMD (`--check` says which and why): their files, their weights and
+their cache shapes were not run on one.
+
+| | |
+|---|---|
+| GPU | AMD Radeon RX 9060 XT, gfx1200 (RDNA4), 15.92 GiB VRAM, ROCm 7.2.4, hipcc 7.2 |
+| CPU / RAM | Ryzen 5 5600XT, 12 hardware threads / 31.3 GiB + zram, CachyOS (Linux) |
+| Model | `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`, 22,663,387,424 B, sha256 `0b21525e...` |
+| Engine | this checkout's `strata-poly`, `-DSTRATA_POLY_HIP=ON`, `build-poly-hip/strata-poly` |
+| Runs | `.pi/plans/poly-hip/m4-summary.md` (the command line, quiet machine) and `bench/run-rx9060xt-qwen36-llamacpp-b11548/` (through the server) |
+
+### Building it
+
+Setup does it - `./setup.sh --backend hip --family qwen36` compiles this source for the card into
+`engine-poly/` and writes the run config, the start script and the server settings. By hand:
+
+```sh
+cmake -S . -B build-poly-hip \
+  -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_POLY_HIP=ON -DSTRATA_PREFILL_MMQ=ON \
+  -DCMAKE_HIP_ARCHITECTURES=gfx1200 -DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++ \
+  -DCMAKE_HIP_COMPILER_ROCM_ROOT=/opt/rocm -DCMAKE_PREFIX_PATH=/opt/rocm \
+  -DCMAKE_HIP_FLAGS="--rocm-path=/opt/rocm --rocm-device-lib-path=/opt/rocm/amdgcn/bitcode" \
+  -DSTRATA_GGML_DIR="$PWD/third_party/llama.cpp"
+cmake --build build-poly-hip --target strata-poly -j12
+```
+
+Two deviations from the first engine's text above, both hit here first. ROCm 7.2 keeps its device library in
+`/opt/rocm/amdgcn/bitcode`, not in `/opt/rocm/lib/llvm/amdgcn/bitcode`, and the configure stops with
+`cannot find ROCm device library` without `--rocm-device-lib-path`. And the first build of this engine was made
+with `-j8`: hipcc's device compilation runs this 31.3 GiB machine out of memory at `-j12` (the two binaries
+alone link at `-j12`). `STRATA_POLY_HIP` defaults to OFF, so a configure without it is the CUDA-only tree the
+first engine builds, unchanged.
+
+### Context, expert cache, and speed
+
+Qwen3.6's file has 10,496 routed experts. `--max-context` is how much a conversation can hold; the attention
+caches grow into VRAM as it fills and take that VRAM from the expert cache. Three contexts, a quiet machine,
+three runs each (`--threads 12 --conversation-cache-mib 0 --prompt-cache 6 --tail-skip 6
+--vram-reserve-mib 1024`, the engine's default VMM path):
+
+| context | prompt | experts in VRAM | from VRAM | prompt tok/s (three runs, median) | decode tok/s (three runs, median) | peak RSS |
+|---|---|---|---|---|---|---|
+| 8,192 | 2,000 tokens | 6,672 (11.9 GiB) | 93.4% | 949.9 / 1184.2 / 1184.0 - **1184.0** | 71.60 / 88.59 / 88.47 - **88.47** | 22.09 GiB |
+| 131,072 | 20,000 tokens | 6,391 (11.4 GiB) | 92.7% | 1365.4 / 1200.2 / 1212.5 - **1212.5** | 78.63 / 79.11 / 73.77 - **78.63** | 22.56 GiB |
+
+The same two points with `--kv-whole`, which turns the mapping of the attention caches off and takes the whole KV
+cache at load. It is the escape hatch, not the fast path:
+
+| context | prompt | experts in VRAM | from VRAM | prompt tok/s (median) | decode tok/s (median) |
+|---|---|---|---|---|---|
+| 8,192 | 2,000 tokens | 6,632 (11.8 GiB) | 93.4% | 1171.7 | 79.82 |
+| 131,072 | 20,000 tokens | 4,900 (8.7 GiB) | 89.5% | 1329.3 | 78.62 |
+
+At 128K the two write at the same rate (78.63 against 78.62 tok/s), `--kv-whole` reads the prompt a little faster
+(1329.3 against 1212.5), and the difference worth having is the expert cache: 6,391 experts (11.4 GiB) with the
+default against 4,900 (8.7 GiB) with `--kv-whole`, because the 128K attention caches are mapped as rows are
+reached instead of held whole. `--kv-whole` is what to use if a driver refuses a mapping. Peak VRAM beside a 128K
+command-line run on this card was 15.79 GiB of its 15.92 (a `rocm-smi --showmeminfo vram` sampler in
+`.pi/plans/poly-hip/m4-run.txt`, which is a busier run than the two tables above; the peak RSS column is
+`m4-summary.md`'s, from the quiet ones).
+
+### Keep VRAM free: the default reserve was too small for 128K
+
+The engine keeps some VRAM for other programs (`--vram-reserve-mib`); the expert cache takes that much less. Its
+default is a thirty-second of the card - 509 MiB here - and that was not enough for the attention cache to grow at
+a 36,864 context: three consecutive requests of the benchmark below failed with
+`no VRAM for the attention cache (4 MiB more)`, the expert cache holding the card. The same benchmark with
+`--vram-reserve-mib 2048` had no error at all. That is what it costs: 5,831 experts in VRAM (10.4 GiB) against
+6,674 (11.9 GiB) with the default, and 1,053.5 tok/s on a 4K prompt against 1,207.6. Setup writes **2048 MiB** on
+this card when `--vram-reserve-mib` is not given - the reserve those runs needed - and an explicit
+`--vram-reserve-mib` wins. A larger one buys the attention cache more room and costs the expert cache that much.
+The 128K command-line runs in the tables above used 1024.
+
+### Through the server: the web app and the OpenAI API
+
+`serve/server.py` drives this engine in `--serve` mode on this card, and `bench/bench_vs_llama.py` measured it
+through the OpenAI API beside llama.cpp's (`bench/run-rx9060xt-qwen36-llamacpp-b11548/`, medians over three
+rounds, the run config's `--vram-reserve-mib 2048` and `--max-context 36864`, one prompt and one answer per
+cell):
+
+| prompt | n | prompt tok/s | decode tok/s | time to first token | RSS |
+|---|---|---|---|---|---|
+| 4,052 tokens | 12 | 1,053.5 | 57.10 | 3.89 s | 22.5 GiB |
+| 32,000 tokens | 3 | 885.4 | 31.80 | 36.20 s | 22.9 GiB |
+
+The 4K cell pools the benchmark's two runs - the first with the engine's default reserve, which answered every 4K
+request and failed its three 32K requests, the second with 2048 - hence `n` 12 against the 32K cell's 3. The decode
+rate is well below the 78-88 tok/s of the section above: the server run has a smaller expert cache
+(5,831 experts at the 2,048 MiB reserve), a 36,864 context and the harness' own prompt and answer lengths. The
+two are different runs and the difference was not investigated.
+
+### Against llama.cpp's HIP build on the same card
+
+llama.cpp build 11548 - itself a HIP build for this card - cannot load this file at `-ngl 99`: it asks for
+20,583.34 MiB and fails. It fits with `-ncmoe 16` (the experts of the first 16 of its 41 layers in RAM), and its
+own log names the card. Same file, same card, both through their servers, medians:
+
+| prompt | PolyStrata | llama.cpp | |
+|---|---|---|---|
+| 4K (4,052 tokens) | 1,053.5 tok/s prompt, 57.10 tok/s decode | 680.0 / 25.35 | **1.55x** the prompt speed, **2.25x** the answer speed |
+| 32K (a 36,864 context) | 885.4 / 31.80 | 624.9 / 19.27 | **1.42x** / **1.65x** |
+
+llama.cpp's `--spec-type ngram-simple` changed nothing measurable on these prompts; PolyStrata guesses with the
+model's own draft block and accepted 0.64-0.75 of its guesses. Peak VRAM over that whole session, both engines, a
+2 Hz sampler, was 16.75 GB (16,751,202,304 B); the harness' own VRAM column is `nvidia-smi`'s and reads 0 here,
+so it is not a measurement. `-ncmoe 16` is a fitting argument, not a tuned setting, and llama.cpp's CPU-side
+experts come from the same page-cached file without the router-aware cache this engine keeps. The whole run, its
+logs, its configs and what it did not test: `bench/run-rx9060xt-qwen36-llamacpp-b11548/README.md`.
+
+### What was not tested
+
+- **A filled 128K conversation.** 128K is what the runs above configured and their prompts are 20,000 and 32,000
+  tokens; a conversation that fills it was not run. A 32,768 context with an 8,192-token prompt was run once per
+  arm and is not quoted here: one run each, and the decode rate was far below the other two contexts, which was
+  not looked into.
+- **The parked-conversation cache** (`--conversation-cache-mib`): every measured run kept it 0. Setup does not
+  offer it on an AMD card for that reason.
+- **Other AMD cards, other ROCm versions, other quantizations of this model.** One card (gfx1200) on ROCm 7.2.4
+  with UD-Q4_K_M is the whole of it. Setup refuses the rest.
+- **The engine's other four models** - GLM 5.3 Flash, Ornith 1.5, Gemma 4 26B-A4B, Tiel Coder - on an AMD card,
+  and images on one: the encoder is the CPU build, and nothing with it and this engine was measured.
+- **CUDA.** This port left the CUDA build of the engine unchanged and does not build or run it here: this machine
+  has no NVIDIA card and no CUDA toolkit.
 
 ## RDNA2 (gfx1030)
 

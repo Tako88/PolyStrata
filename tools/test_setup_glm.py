@@ -198,10 +198,11 @@ class Main(unittest.TestCase):
         self.tmp.cleanup()
 
     def main(self, argv=(), ram=128.0, vram=31.84, model=False, answers=None, win=False, n_gpus=1, family="glm",
-             cores=None):
+             cores=None, amd=None):
         """answers: None = --yes; else {words of a question: its answer} (Enter for the others); the questions asked
         are kept in self.asked.  model: False, True (this file's M) or a size's name.  cores: (performance,
-        efficiency) of a hybrid CPU."""
+        efficiency) of a hybrid CPU.  amd: the AMD cards amd_gpus() reports ([]: this PC has none), for
+        --backend hip."""
         self.asked = []
 
         def fake_input(prompt=""):
@@ -219,8 +220,9 @@ class Main(unittest.TestCase):
             dst.write_bytes(b"")
             setup.mark(dst)
 
-        def fake_build(gpu, yes, llama, vision="none", toolkit=13):
+        def fake_build(gpu, yes, llama, vision="none", toolkit=13, hip=False):
             self.built.append(gpu["archs"])
+            self.built_hip = hip
             self.encoder, self.toolkit = vision, toolkit
             eng = self.t / setup.ENGINE_POLY_DIR
             eng.mkdir(exist_ok=True)
@@ -234,7 +236,7 @@ class Main(unittest.TestCase):
             mock.patch.object(setup, "data_folder", lambda d: (self.t / "data", [])),
             mock.patch.object(setup, "installed_configs", lambda: []),
             mock.patch.object(setup, "gpus", lambda: found),
-            mock.patch.object(setup, "amd_gpus", lambda *a: []),
+            mock.patch.object(setup, "amd_gpus", lambda *a: list(amd or [])),
             mock.patch.object(setup, "ram_gb", lambda: ram),
             mock.patch.object(setup, "cpu_info", lambda: ("Test CPU", True, True)),
             mock.patch.object(setup, "cpu_cores", lambda: cores),
