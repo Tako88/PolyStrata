@@ -515,8 +515,34 @@ so it is not a measurement. `-ncmoe 16` is a fitting argument, not a tuned setti
 experts come from the same page-cached file without the router-aware cache this engine keeps. The whole run, its
 logs, its configs and what it did not test: `bench/run-rx9060xt-qwen36-llamacpp-b11548/README.md`.
 
+### The expert cache grows back after it gives VRAM up
+
+On ROCm 7.2.4 with this card, `hipMemUnmap` and `hipMemRelease` return nothing to `hipMemGetInfo`: after
+releasing 2 GiB in 32 pieces its free figure is byte-identical (13.68 GiB), while the process can re-create and
+re-map the same 2 GiB. The runtime holds that memory in a pool of its own that the free figure does not show
+(`tests/hip/vmm_release_probe.cpp`, reporting only, not a test entry).
+
+The engine decides whether it may grow the expert cache from exactly that figure, so a shrink could take the cache
+away for good. Measured through the server's `POST /v1/vram` (`--max-context 32768 --vram-reserve-mib 1536`,
+asking for 4,096 MiB free): with a binary built from the tree before this change, the first command left
+`expert_slots` 0 with `expert_cache_mib` 0, three cycles kept it at 0, cache hits were 0.0% and 11 GiB of VRAM
+stayed held for a cache of no experts - the shape a 128K server session hit on 2026-10-13, ten `the expert cache`
+lines and then nothing from VRAM.
+
+Now the pieces a reservation gives up stay its own and are mapped again instead of asking the driver, and that pool
+counts as free VRAM where the engine sizes the cache and decides whether to grow. The same cycles: 6,114 experts
+down to 4,708 and back to **6,114** in 1.4 s, four more cycles the same, the kernel's `mem_info_vram_used` flat at
+15.00 GiB across all of them, and a short request after them reporting **92.5%** cache hits (0.0% before). The
+`INFO` line and the `POST /v1/vram` answer carry the pool as `vram_pool_mib`. The attention caches' growth is
+attempted before the expert cache is cut, and when a cut cannot be avoided the pieces are released, because the
+rows need VRAM the driver can hand out again. With `--kv-whole` the attention caches are given the whole context
+at load, so none of this runs.
+
 ### What was not tested
 
+- **The attention caches' refusal path.** The runs above drive `POST /v1/vram`; a 32,000-token prompt at a
+  131,072 context reaches the same code from a real conversation, and was not run here: it takes the engine to
+  about 22 GiB of RAM beside the model.
 - **A filled 128K conversation.** 128K is what the runs above configured and their prompts are 20,000 and 32,000
   tokens; a conversation that fills it was not run. A 32,768 context with an 8,192-token prompt was run once per
   arm and is not quoted here: one run each, and the decode rate was far below the other two contexts, which was

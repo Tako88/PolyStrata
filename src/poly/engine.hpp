@@ -256,6 +256,11 @@ public:
     /// first card's reserve and the least that one of them has free.
     int reserve_mib() const { return reserve_mib_; }
     int64_t vram_free_mib() const;
+    /// What the reservations hold unused: the bytes of the pieces vmm_unmap() gave back and that vmm_map() will
+    /// re-map (Mapped::free, HIP only), in MiB.  Reported (main.cpp's INFO line and the VRAM command) and
+    /// counted as free where this engine decides what the caches may hold: fill_expert_cache()'s sizing and
+    /// mind_card_vram()'s growth.  Zero on CUDA.
+    int64_t vmm_pool_mib() const;
     /// The expert cache sized again, to leave `mib` of VRAM free (below 0: what load() left), and filled with the
     /// experts used most so far.  Without VMM it gets no larger than load() made it.  Between calls that feed
     /// tokens: the experts it gives up are computed on the CPU from then on, as any expert outside it.
@@ -415,6 +420,22 @@ protected:
         unsigned long long base = 0;   ///< a CUdeviceptr
         size_t reserved = 0, mapped = 0;
         std::vector<std::pair<unsigned long long, size_t>> pieces;   ///< allocation handles and their bytes, in order
+#if defined(STRATA_USE_HIP)
+        // M6, HIP only: the pieces this reservation has given up, unmapped but still owned here, as {handle,
+        // bytes}, in the order they left.  vmm_unmap() takes from the back, so the last piece out is the first
+        // one back in.  The invariant: a handle is on this list if and only if it was mapped here, then unmapped
+        // here, and has never been released -- so it is never mapped twice and never released twice; it holds
+        // VRAM until the reservation is torn down, and vmm_free() (the destructor) releases what is left on the
+        // list, after the still-mapped pieces.  An entry whose size no vmm_map() asks for again can strand on the
+        // list until then (bounded, and released by vmm_free()): vmm_map() re-maps by exact size, so a mixed-size
+        // reservation -- a Kv whose last growth took the SIZE_MAX fallback (cover(), rows % kKvGrow != 0) -- can
+        // keep a piece aside for the rest of the process's life.  The list exists because hipMemUnmap +
+        // hipMemRelease returns
+        // nothing to hipMemGetInfo on this stack (ROCm 7.2.4, gfx1200, .pi/plans/poly-hip/m6-probe-evidence.txt),
+        // so the arena keeps what it gives up and vmm_map() re-maps it instead of asking the driver again.  CUDA
+        // releases in vmm_unmap() and has no such list.
+        std::vector<std::pair<unsigned long long, size_t>> free;
+#endif
     };
     struct Kv : Mapped {
         size_t bytes = 0;   ///< for every `per` rows
@@ -424,6 +445,7 @@ protected:
     void vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what);
     void vmm_unmap(Mapped& m, size_t bytes);
     void vmm_free(Mapped& m);
+    void vmm_drop(Mapped& m);   ///< releases what m gave up (HIP: cover()'s retry needs physical VRAM back)
     void shrink_cache(size_t bytes);
     int grow_cache(size_t bytes);
     void resize_card_cache(int mib);   ///< resize_cache() and mind_vram() for this engine's card

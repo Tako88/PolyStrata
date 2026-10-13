@@ -537,12 +537,24 @@ bool parse_gen(const std::string& line, long long& max_new, Sampling& s, int32_t
 
 int serve(Session& ss) {
     Engine& engine = ss.engine;
+#if defined(STRATA_USE_HIP)
+    // M6: vram_pool_mib is what the reservations hold unused (Mapped::free) -- VRAM the process can map again but
+    // hipMemGetInfo does not report.  The CUDA side keeps today's line, its tokens and its argument list.
+    std::printf("INFO context=%d expert_slots=%d expert_cache_mib=%lld pool_workers=%d conversation_cache_mib=%lld "
+                "conversation_cache_slots=%d conversation_cache_min_free_mib=%lld vram_free_mib=%lld "
+                "vram_pool_mib=%lld vram_elastic=1 "
+                "engine=" STRATA_VERSION "\n",
+                engine.max_context(), engine.cached_experts(), (long long) (engine.cached_gib() * 1024.0),
+                engine.threads(), (long long) ss.flags.o.park_mib, ss.flags.o.park_slots, ss.flags.min_free_mib,
+                (long long) engine.vram_free_mib(), (long long) engine.vmm_pool_mib());
+#else
     std::printf("INFO context=%d expert_slots=%d expert_cache_mib=%lld pool_workers=%d conversation_cache_mib=%lld "
                 "conversation_cache_slots=%d conversation_cache_min_free_mib=%lld vram_free_mib=%lld vram_elastic=1 "
                 "engine=" STRATA_VERSION "\n",
                 engine.max_context(), engine.cached_experts(), (long long) (engine.cached_gib() * 1024.0),
                 engine.threads(), (long long) ss.flags.o.park_mib, ss.flags.o.park_slots, ss.flags.min_free_mib,
                 (long long) engine.vram_free_mib());
+#endif
     std::printf("READY %d stop\n", engine.max_context());
     std::fflush(stdout);
 
@@ -581,11 +593,21 @@ int serve(Session& ss) {
                                      "(%.2f of %.2f GiB), %lld MiB free now, in %.0f ms\n",
                              engine.reserve_mib(), before, engine.cached_experts(), engine.full_experts(),
                              engine.cached_gib(), engine.full_gib(), free_mib, ms_since(t0));
+#if defined(STRATA_USE_HIP)
+                // M6: vram_pool_mib, as in the INFO line above.  The CUDA side keeps today's answer, its tokens
+                // and its argument list.
+                std::printf("VRAM reserve_mib=%d expert_slots=%d expert_slots_full=%d expert_cache_mib=%lld "
+                            "expert_cache_full_mib=%lld vram_free_mib=%lld vram_pool_mib=%lld prompt_chunk=%d\n",
+                            engine.reserve_mib(), engine.cached_experts(), engine.full_experts(),
+                            (long long) (engine.cached_gib() * 1024.0), (long long) (engine.full_gib() * 1024.0),
+                            free_mib, (long long) engine.vmm_pool_mib(), engine.max_rows());
+#else
                 std::printf("VRAM reserve_mib=%d expert_slots=%d expert_slots_full=%d expert_cache_mib=%lld "
                             "expert_cache_full_mib=%lld vram_free_mib=%lld prompt_chunk=%d\n",
                             engine.reserve_mib(), engine.cached_experts(), engine.full_experts(),
                             (long long) (engine.cached_gib() * 1024.0), (long long) (engine.full_gib() * 1024.0),
                             free_mib, engine.max_rows());
+#endif
             } catch (const std::exception& e) {
                 std::printf("ERR VRAM: %s\n", e.what());
             }

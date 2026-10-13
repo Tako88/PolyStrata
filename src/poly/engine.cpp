@@ -482,13 +482,46 @@ void Engine::vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what) {
     while (m.mapped < bytes) {
         const size_t n = std::min(bytes - m.mapped, piece);
         CUmemGenericAllocationHandle h = 0;
+#if defined(STRATA_USE_HIP)
+        bool mine = false;   // h came off m.free: the reservation still owns it, so a failure puts it back
+        // M6: a piece this reservation gave up is re-mapped before the driver is asked for a new one -- on this
+        // stack hipMemCreate after hipMemRelease takes NEW physical memory while the released pieces sit in the
+        // runtime's pool, invisible to hipMemGetInfo (.pi/plans/poly-hip/m6-probe-evidence.txt).  Back to front:
+        // vmm_unmap() takes from the back, so the piece it gave back last goes in first, and with a uniform-size
+        // LIFO cycle it lands at the offset it left (m.base + m.mapped, the high-water mark); a size-skipped entry
+        // can land elsewhere, which costs nothing -- VMM placement is the caller's to ignore.  Only an exact size
+        // used: a reservation's pieces all have one size (M4b's whole pieces, M4c's chunks) and re-mapping
+        // another size would break the hipMemSetAccess rule those two exist for; an entry of another size stays
+        // for a later call.  With no match at all, cuMemCreate below is the fallback.
+        for (auto it = m.free.end(); it != m.free.begin();) {
+            --it;
+            if (it->second == n) {
+                h = it->first;
+                mine = true;
+                m.free.erase(it);
+                break;
+            }
+        }
+        if (!h && cuMemCreate(&h, n, &prop, 0) != CUDA_SUCCESS)
+            throw std::runtime_error("no VRAM for " + std::string(what) + " (" + std::to_string(n >> 20) +
+                                     " MiB more)");
+#else
         if (cuMemCreate(&h, n, &prop, 0) != CUDA_SUCCESS)
             throw std::runtime_error("no VRAM for " + std::string(what) + " (" + std::to_string(n >> 20) +
                                      " MiB more)");
+#endif
         const CUdeviceptr at = m.base + m.mapped;
         const CUresult mapped = cuMemMap(at, n, 0, h, 0);
+#if defined(STRATA_USE_HIP)
+        if (mapped != CUDA_SUCCESS) {
+            if (mine) m.free.emplace_back(h, n);   // never released: back on the list it came from
+            else cuMemRelease(h);
+        }
+        cu_ck(mapped, "mapping VRAM");
+#else
         if (mapped != CUDA_SUCCESS) cuMemRelease(h);
         cu_ck(mapped, "mapping VRAM");
+#endif
         m.pieces.emplace_back(h, n);
         m.mapped += n;
 #if defined(STRATA_USE_HIP)
@@ -501,7 +534,8 @@ void Engine::vmm_map(Mapped& m, size_t bytes, size_t piece, const char* what) {
             m.pieces.pop_back();
             m.mapped -= n;
             cuMemUnmap(at, n);
-            cuMemRelease(h);
+            if (mine) m.free.emplace_back(h, n);   // the reservation's own handle: vmm_unmap() never released it
+            else cuMemRelease(h);
         }
         cu_ck(acc, "granting access to VRAM");
 #else
@@ -517,7 +551,14 @@ void Engine::vmm_unmap(Mapped& m, size_t bytes) {
         m.mapped -= n;
         m.pieces.pop_back();
         cu_ck(cuMemUnmap(m.base + m.mapped, n), "unmapping VRAM");
+#if defined(STRATA_USE_HIP)
+        // M6: the handle stays the reservation's.  hipMemRelease would not return the VRAM to hipMemGetInfo on
+        // this stack (m6-probe-evidence.txt), and the cache needs it back as the conversation grows; vmm_map()
+        // re-maps it at this same offset when the same size is asked for, and vmm_free() releases what is left.
+        m.free.emplace_back(h, n);
+#else
         cu_ck(cuMemRelease(h), "unmapping VRAM");
+#endif
     }
 }
 
@@ -528,8 +569,34 @@ void Engine::vmm_free(Mapped& m) {
         cuMemUnmap(m.base + m.mapped, m.pieces.back().second);
         cuMemRelease(m.pieces.back().first);
     }
+#if defined(STRATA_USE_HIP)
+    // M6: the pieces vmm_unmap() gave back are still owned here, so they hold VRAM until the process ends.
+    // Release them here -- vmm_unmap() never did, so this is the one release each of those handles gets -- and
+    // only then the addresses.
+    for (const auto& [h, n] : m.free) {
+        (void) n;   // hipMemRelease takes the handle alone
+        cuMemRelease(h);
+    }
+    m.free.clear();
+#endif
     if (m.base) cuMemAddressFree(m.base, m.reserved);
     m.base = 0;
+}
+
+// M6: gives up what m still holds on its free list, so the driver has the VRAM again.  One caller needs that:
+// cover()'s retry, where the rows need physical VRAM that a handle this process owns is not (a keep-style
+// shrink frees no physical VRAM -- it only takes the mappings away -- so it cannot fund a cuMemCreate).  The
+// elastic paths keep their pieces instead, which is what lets the expert cache grow back (m6-evidence.txt).
+void Engine::vmm_drop(Mapped& m) {
+#if defined(STRATA_USE_HIP)
+    for (const auto& [h, n] : m.free) {
+        (void) n;   // hipMemRelease takes the handle alone
+        cuMemRelease(h);
+    }
+    m.free.clear();
+#else
+    (void) m;   // CUDA releases in vmm_unmap() and has no free list
+#endif
 }
 
 void* Engine::kv_alloc(size_t bytes, int per) {
@@ -556,6 +623,13 @@ void Engine::cover(int64_t end) {
         more += std::min(up_to(size(k), grain_), k.reserved) - k.mapped;
         held += k.mapped;
     }
+#if defined(STRATA_USE_HIP)
+    // M6(b): no cut is taken here.  hipMemGetInfo does not see the pieces the expert cache gave back (the
+    // runtime holds them in its own pool: m6-probe-evidence.txt), so this cut was decided from a number that
+    // ignores the process's own VRAM -- the live session of 2026-10-13 walked its cache to 0 experts this way and
+    // never got it back (0.0% hits, ~40 tok/s, ~14.8 GiB held for a 0-byte cache).  The map below is attempted
+    // first and only a refusal shrinks, by at least what the attempt wanted; the CUDA side keeps the cut.
+#else
     if (exp_) {
         size_t free_b = 0, total_b = 0;
         ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
@@ -564,6 +638,7 @@ void Engine::cover(int64_t end) {
         if (free_b < more + quarter) cut = std::max(cut, more + quarter - free_b);
         if (cut) shrink_cache(cut);
     }
+#endif
 #if defined(STRATA_USE_HIP)
     // M4c: one kKvGrow-row chunk per piece.  The M4b call asked for the whole growth as one SIZE_MAX piece,
     // so the load's cover(1) mapped 4096 rows and the first prefill past it mapped a LARGER piece into the
@@ -580,12 +655,28 @@ void Engine::cover(int64_t end) {
     // mapping.  rows % kKvGrow != 0 sends that case to today's one SIZE_MAX piece, which maps fully or
     // throws, instead of silently under-mapping and then counting the rows as mapped.  The CUDA side keeps
     // that one SIZE_MAX piece it has today.
-    for (Kv& k : kv_) {
-        const size_t chunk = (size_t) ((kKvGrow + k.per - 1) / k.per) * k.bytes;
-        if (kKvGrow % k.per == 0 && chunk % grain_ == 0 && rows % kKvGrow == 0)
-            vmm_map(k, size(k), chunk, "the attention cache");
-        else
-            vmm_map(k, size(k), SIZE_MAX, "the attention cache");   // today's call, unchanged
+    const auto map_all = [&] {
+        for (Kv& k : kv_) {
+            const size_t chunk = (size_t) ((kKvGrow + k.per - 1) / k.per) * k.bytes;
+            if (kKvGrow % k.per == 0 && chunk % grain_ == 0 && rows % kKvGrow == 0)
+                vmm_map(k, size(k), chunk, "the attention cache");
+            else
+                vmm_map(k, size(k), SIZE_MAX, "the attention cache");   // today's call, unchanged
+        }
+    };
+    // M6(b): the map is attempted first, and one refusal shrinks the expert cache and retries once; a second
+    // refusal propagates as it did before.  A cut for the whole growth, as the CUDA side takes up front, is more
+    // than a refusal needs and comes from a number the pool is invisible to.  The retry needs physical VRAM, so
+    // what the cache gives up here is released (vmm_drop): a keep-style shrink returns mappings, not VRAM, and
+    // would leave the retry refusing exactly where the first attempt did.  The elastic paths (mind_card_vram(),
+    // the VRAM command) keep their pieces instead -- that is what lets the cache grow back.
+    try {
+        map_all();
+    } catch (const std::runtime_error&) {
+        if (!exp_) throw;   // the experts are in RAM only (--no-gpu-experts): nothing to give up
+        shrink_cache(std::max(held + more > budget_ ? held + more - budget_ : 0, more));
+        vmm_drop(arena_);
+        map_all();
     }
 #else
     for (Kv& k : kv_) vmm_map(k, size(k), SIZE_MAX, "the attention cache");
@@ -962,6 +1053,24 @@ int64_t Engine::vram_free_mib() const {
     return next_ ? std::min(mib, next_->vram_free_mib()) : mib;
 }
 
+// M6: what the reservations hold unused (Mapped::free), in MiB -- VRAM the process can map again but
+// hipMemGetInfo does not report.  Reported in the INFO line and the VRAM command, and counted as free by the
+// two places that decide what the caches may hold (fill_expert_cache()'s sizing and mind_card_vram()'s
+// growth).  Two limits: only the expert arena's list is counted there (a Kv list, which cover() drops rather
+// than keeps, is reported but not a decision), and this reads this engine's lists alone, where vram_free_mib()
+// takes the smallest of a --layer-split chain's cards.
+int64_t Engine::vmm_pool_mib() const {
+#if defined(STRATA_USE_HIP)
+    size_t bytes = 0;
+    for (const auto& p : arena_.free) bytes += p.second;
+    for (const Kv& k : kv_)
+        for (const auto& p : k.free) bytes += p.second;
+    return (int64_t) (bytes >> 20);
+#else
+    return 0;
+#endif
+}
+
 // Experts go to VRAM by use per byte when there are counts, the profile's and this run's, and otherwise the same
 // number from every layer.
 //
@@ -975,6 +1084,15 @@ void Engine::fill_expert_cache() {
     if (!opt_.gpu_experts || n_moe_ == 0) return;
     size_t free_b = 0, total_b = 0;
     ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
+#if defined(STRATA_USE_HIP)
+    // M6(c): the pieces this reservation gave up are still its own VRAM -- vmm_unmap() keeps them, vmm_map()
+    // re-maps them -- but hipMemGetInfo cannot see the runtime's pool, so free_b under-reports by exactly what
+    // is on the list.  Every figure below is a decision about what the caches may hold, so the pool is counted
+    // here.  Without this a resize sizes the cache from the card's leftovers alone: after an 11 GiB cache was
+    // given up, free_b was the 12 MiB above the reserve, the map took no piece (hipMemCreate has nothing left
+    // while the pool holds it), and the cache came back with 0 experts (.pi/plans/poly-hip/m6-evidence.txt).
+    for (const auto& p : arena_.free) free_b += p.second;
+#endif
     const size_t ram = ram_available(), files = gg_->bytes() + (dg_ ? dg_->bytes() : 0);
     ram_tight_ = ram > 0 && files + (4ULL << 30) > ram;
     // 256 MiB at least, whatever was asked: the launches recorded later take theirs out of the reserve (mind_vram())
@@ -1183,12 +1301,30 @@ bool Engine::mind_card_vram() {
     }
     if (minds_++ == 0) return false;   // nothing is recorded before the first request
     const int64_t keep = opt_.vram_reserve_mib >= 0 || ram_tight_ ? reserve_mib_ : std::max(reserve_mib_ / 2, 128);
-    if (free < keep / 2) {
-        shrink_cache(size_t(keep - free) << 20);
+#if defined(STRATA_USE_HIP)
+    // M6(a): the pieces the arena gave up are still this process's -- the runtime holds them in a pool
+    // hipMemGetInfo cannot see (m6-probe-evidence.txt) -- so growth out of that pool is attempted first, on the
+    // free list alone (the card's own figure is not consulted for it).  grow_cache() maps out of the free list,
+    // one kArenaPiece at a time, and returns 0 when it took no expert; the two free-VRAM decisions below then run
+    // as they did before, with what the attempt did not take.
+    size_t spare = 0;
+    for (const auto& p : arena_.free) spare += p.second;
+    if (spare >= kArenaPiece && grow_cache(spare) > 0) return true;
+    spare = 0;   // the attempt may have mapped pieces and taken no expert: read the list as it is now
+    for (const auto& p : arena_.free) spare += p.second;
+    // M6(c): and those pieces are VRAM this engine can map again, so the two decisions below count them as
+    // free.  hipMemGetInfo leaves them out, so a full pool reads as "the card is nearly empty": the 2026-10-13
+    // session shrank its cache to 0 experts on that reading and never grew it back (m6-evidence.txt).
+    const int64_t usable = free + (int64_t) (spare >> 20);
+#else
+    const int64_t usable = free;   // the CUDA side reads the card's own figure, as it did
+#endif
+    if (usable < keep / 2) {
+        shrink_cache(size_t(keep - usable) << 20);
         held_is_budget();
         return true;
     }
-    return free >= keep + (int64_t) (kArenaPiece >> 20) && grow_cache(size_t(free - keep) << 20) > 0;
+    return usable >= keep + (int64_t) (kArenaPiece >> 20) && grow_cache(size_t(usable - keep) << 20) > 0;
 }
 
 // The cache's VRAM and the attention caches' as they are now become the budget cover() keeps them to.
