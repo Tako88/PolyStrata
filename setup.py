@@ -302,7 +302,11 @@ CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]
 # The AMD cards the strata-poly engine has been measured on, as the "hip_archs" of the sizes of the family that was
 # (docs/AMD_HIP.md): an AMD card outside this list is refused exactly as every AMD card is refused today.  M4/M5
 # measured Qwen3.6-35B-A3B UD-Q4_K_M on an RX 9060 XT (gfx1200), ROCm 7.2.4, one card, in this checkout's own HIP
-# build; the other sizes of that family and every other family are unmeasured there.
+# build, and on 2026-10-13 Tiel Coder 35B-A3B's UD-Q4_K_XL size on the same card in the same build
+# (docs/AMD_HIP.md: 985.0 / 507.5 / 344.3 / 264.6 tok/s of read at 33K / 66K / 98K / 129K of context against
+# 1,029.0 / 512.3 / 348.7 / 270.7 for the qwen36 size, 994 MiB on the card at the end, and a coding task its
+# answer passed where the qwen36 answer's did not); the other sizes of both families and every other family are
+# unmeasured there.
 POLY_HIP_ARCHS = ("gfx1200",)
 # The VRAM setup keeps free on that card.  The engine's own default is a thirty-second of the card (509 MiB here) and
 # the attention cache could not grow at a 36864 context with it: three rounds failed with "no VRAM for the attention
@@ -484,7 +488,8 @@ FAMILIES = {
                                        "vram_beside_gb": 4.4, "draft": "own"},
                         "UD-Q4_K_XL": {"about": "4-bit experts, 5- and 6-bit where they write",
                                        "download_gb": 22.7, "ram_gb": 27, "arena_gb": 20.0,
-                                       "vram_beside_gb": 4.8, "draft": "own"}},
+                                       "vram_beside_gb": 4.8, "draft": "own",
+                                       "hip_archs": POLY_HIP_ARCHS}},  # measured on the RX 9060 XT; see POLY_HIP_ARCHS
              "sha256": {"Tiel-Coder-35B-A3B-MTP-UD-Q3_K_XL.gguf":
                         (17234935648, "46b8fbeba6e888c9a101e49cc717baa9bb8dfa0d203ec7b3185288159543ec14"),
                         "Tiel-Coder-35B-A3B-MTP-UD-IQ3_XXS.gguf":

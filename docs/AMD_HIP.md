@@ -623,6 +623,39 @@ curve stops where it is still usable. Measured on this card, the same engine and
   stayed mapped) on 53 of one session's requests, and the request after each put them back, with the card pinned
   at 15.2 GiB (`.pi/plans/poly-hip/m24-live-oscillation.txt`).  Growth still draws on the pool, through the same budget.
 
+### Tiel Coder 35B-A3B, the first poly family measured here besides Qwen3.6
+
+Setup refuses the `ornith`, `gemma4` and `tiel` families on AMD because none had been measured there, not
+because their engine cannot run: all three are `qwen35moe`/`gemma4` on the same `strata-poly` build this card already runs.
+Measured on 2026-10-13, the same card and build as the ramps above, 32 GB of RAM, the desktop up: Tiel Coder's
+`UD-Q4_K_XL` file (22.75 GB, the sha `setup.py` pins) loads with **4,116 of 10,496 experts in VRAM
+(7.3 GiB)**, RSS 23.2 GiB, and no unsupported-quant report — its experts are Q4_K with Q5_K/Q6_K where they write,
+the types the qwen36 size already ran.  Its 128K ramp at `--vram-reserve-mib 1024 --vram-plan`, 8 tokens asked per
+step, against Qwen3.6-35B-A3B's at the same flags (M28 above):
+
+| context | read | prefill tok/s | decode tok/s | engine free | card free |
+|---|---|---|---|---|---|
+| 33,001 | 33,001 | 985.0 | 29.8 | 3,328 | 3,099 |
+| 65,769 | 37,097 | 507.5 | 26.3 | 2,304 | 2,374 |
+| 98,537 | 45,289 | 344.3 | 39.1 | 1,584 | 1,669 |
+| 129,233 | 55,505 | 264.6 | 29.4 | 504 | 994 |
+| *qwen36, M28* | | *1,029.0 / 512.3 / 348.7 / 270.7* | | | *1,091* |
+
+The read is 1 to 4% slower at every depth, the plan held as it did there (`vram_planned_mib` 2024 -> 0, no monitor
+resize, 994 MiB on the card at the end), and the decode column is one 8-token sample per step, not the long-answer
+figure.  On a coding task — an implicit-key treap with split/merge, checked by 25 independent random tests — Tiel's
+answer compiled, ran its own 200,000-operation self-test and matched all 25, where Qwen3.6's did not compile (a name
+used above its declaration) and, with that line moved, core-dumped in its own self-test.  One sample each at the
+config's sampling, so the quality difference is suggested, not established.
+
+Until setup accepts the family on this card, the file can be fetched by hand from
+`peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP`, its tokenizer extracted with
+`tools/strata_tokenizer.py --gguf FILE --out packs/tiel-coder-35b-a3b` (`STRATA_GGUF_PY=third_party/llama.cpp/gguf-py`),
+and a config written beside the qwen36 one pointing `exe` at `engine-poly/strata-poly`.
+
+**Not tested:** vision (the mmproj), the MTP draft's own quality, a long-context soak, the i-quant sizes
+(`UD-Q3_K_XL`, `UD-IQ3_XXS`), any other AMD arch, and the `ornith` and `gemma4` families, which stay unmeasured.
+
 ### What was not tested
 
 - **A conversation that fills 256K with `--vram-plan`.** The run above reached 26,016 prompt tokens; the plan's own
