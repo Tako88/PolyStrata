@@ -16,12 +16,9 @@ namespace {
 constexpr float kMinWeightSum = 6.103515625e-5f;   // the floor ggml's MoE graph puts under the gate sum
 constexpr size_t kScoreFloats = size_t(16) << 20;  // the attention's scores of the tokens it takes at a time
 
-// A value a file gives once for the model or once a layer.
-int64_t of_layer(const MetaValue& v, int il) {
-    if (v.type != MetaType::ARRAY) return (int64_t) v.u;
-    if ((size_t) il >= v.items.size()) throw std::runtime_error("a per-layer value of the GGUF ends before its layers");
-    return (int64_t) v.items[(size_t) il].u;
-}
+// A value a file gives once for the model or once a layer: the shared reading of a per-layer array
+// (meta_layer_value()), so the message names the counts rather than a second copy of the same rule.
+int64_t of_layer(const MetaValue& v, int il, int layers) { return meta_layer_value(v, il, layers); }
 
 }  // namespace
 
@@ -63,11 +60,11 @@ void Gemma4::load_geometry() {
     const MetaValue& kv = must("attention.head_count_kv");
     swa_.resize((size_t) n_layer_);
     kv_.resize((size_t) n_layer_);
-    n_head_ = (int) of_layer(heads, 0);
+    n_head_ = (int) of_layer(heads, 0, n_layer_);
     for (int il = 0; il < n_layer_; ++il) {
-        swa_[(size_t) il] = of_layer(pattern, il) != 0;
-        kv_[(size_t) il] = (int) of_layer(kv, il);
-        need(of_layer(heads, il) == n_head_, "layers with different numbers of heads");
+        swa_[(size_t) il] = of_layer(pattern, il, n_layer_) != 0;
+        kv_[(size_t) il] = (int) of_layer(kv, il, n_layer_);
+        need(of_layer(heads, il, n_layer_) == n_head_, "layers with different numbers of heads");
         need(kv_[(size_t) il] > 0 && n_head_ % kv_[(size_t) il] == 0, "bad attention.head_count_kv");
     }
     need(n_head_ > 0 && n_head_ <= 256, "bad attention.head_count");
@@ -136,14 +133,14 @@ void Gemma4::load_draft_shape() {
     guess_.assign((size_t) n, Guess{});
     for (int il = 0; il < n; ++il) {
         Guess& G = guess_[(size_t) il];
-        G.swa = of_layer(pattern, il) != 0;
+        G.swa = of_layer(pattern, il, n) != 0;
         G.of = G.swa ? n_layer_ - 2 : n_layer_ - 1;
         G.dim = G.swa ? dim_swa : dim_full;
         G.n_rot = G.swa ? (rot_swa ? (int) rot_swa->u : dim_swa) : (rot ? (int) rot->u : dim_full);
         need(G.n_rot > 0 && G.n_rot % 2 == 0 && G.n_rot <= G.dim, "bad rope.dimension_count");
         G.theta_scale = std::pow(G.swa && base_swa ? (float) base_swa->f : base_full, -2.f / (float) G.n_rot);
-        need(of_layer(heads, il) == n_head_ && G.dim == (G.swa ? dim_swa_ : dim_full_) &&
-                 of_layer(kv, il) == kv_[(size_t) G.of],
+        need(of_layer(heads, il, n) == n_head_ && G.dim == (G.swa ? dim_swa_ : dim_full_) &&
+                 of_layer(kv, il, n) == kv_[(size_t) G.of],
              "layer " + std::to_string(il) + "'s heads are not those of the model's layer " + std::to_string(G.of));
     }
 }

@@ -7,6 +7,7 @@
 #include "glm5next.hpp"
 #include "lfm2moe.hpp"
 #include "mmq.hpp"
+#include "nemotron.hpp"
 #include "qwen35.hpp"
 #include "runtime.hpp"
 #include "strata/poly/kernels.hpp"
@@ -741,9 +742,10 @@ void Engine::load_shape() {
     const TensorInfo* te = gg_->find("token_embd.weight");
     n_vocab_ = vocab ? (int) vocab->u : te && te->shape.size() == 2 ? (int) te->shape[1] : 0;
     rms_eps_ = shape_f("attention.layer_norm_rms_epsilon");
-    n_expert_ = shape_i("expert_count");
     // A file may give these one value a layer; the model-wide scalars are the largest of them, and a scalar file
-    // takes exactly the path it did before.
+    // takes exactly the path it did before.  The slot, profile and routing arrays are sized by n_expert_'s, so it
+    // must be the largest layer's before any of them is.
+    n_expert_ = shape_i_or_max("expert_count", "expert_count");
     n_used_ = shape_i_or_max("expert_used_count", "expert_used_count");
     n_ff_exp_ = shape_i_or_max("expert_feed_forward_length", "expert_feed_forward_length");
     const MetaValue* shexp = meta_in(*gg_, "expert_shared_feed_forward_length");
@@ -887,6 +889,7 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
         if (name == "gemma4") return std::make_unique<Gemma4>();
         if (name == "deepseek4") return std::make_unique<DeepSeek4>();
         if (name == "lfm2moe") return std::make_unique<Lfm2Moe>();
+        if (name == "nemotron_h_moe") return std::make_unique<Nemotron>();
         throw std::runtime_error(o.model + " is a '" + name + "' model, which this engine does not run");
     };
     int cards = 1;
