@@ -546,7 +546,28 @@ void Engine::cover(int64_t end) {
         if (free_b < more + quarter) cut = std::max(cut, more + quarter - free_b);
         if (cut) shrink_cache(cut);
     }
+#if defined(STRATA_USE_HIP)
+    // Every piece a Kv reservation holds has to be the same size on this stack: ROCm 7.2.4 on gfx1200 refuses
+    // hipMemSetAccess when one reservation holds a whole piece (kKvGrow rows) together with a larger one -- 64
+    // MiB then 1024 MiB fails and 15 x 64 MiB + 4 KiB fails 3/3, while 16 x 64 MiB holds (tests/hip/vmm_probe.cpp
+    // phase 3, .pi/plans/poly-hip/m4b-vmm.txt).  The load's cover(1) maps kKvGrow rows as one piece, and asking
+    // for the whole growth as one piece after it made the next piece a different size: a 20,000-token prompt at
+    // --max-context 131072 stopped at "no VRAM for the attention cache (20 MiB more)" with 6 GiB of the card
+    // free, and cutting the expert cache from 2274 experts to 1143 with --vram-reserve-mib 8192 did not move it.
+    // One kKvGrow-row chunk per piece keeps them equal.  A chunk is passed only when it is a whole number of the
+    // cache's `per` and of grain_ and the rows are a whole number of chunks -- then the mapping is complete, not
+    // short, which is what the caller below needs.  Otherwise today's one SIZE_MAX piece, which maps fully or
+    // throws.  CUDA keeps that piece: this driver takes any shape.
+    for (Kv& k : kv_) {
+        const size_t chunk = (size_t) ((kKvGrow + k.per - 1) / k.per) * k.bytes;
+        if (kKvGrow % k.per == 0 && chunk % grain_ == 0 && rows % kKvGrow == 0)
+            vmm_map(k, size(k), chunk, "the attention cache");
+        else
+            vmm_map(k, size(k), SIZE_MAX, "the attention cache");
+    }
+#else
     for (Kv& k : kv_) vmm_map(k, size(k), SIZE_MAX, "the attention cache");
+#endif
     kv_rows_ = rows;
 }
 
