@@ -3,7 +3,7 @@
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · **Français** · [Español](README.es.md) · [Português](README.pt-BR.md)
 
 <p align="center"><b>Faites tourner de grands modèles d'IA sur votre propre PC</b><br>
-Qwen3.8-Flash-Next, GLM 5.3 Flash, Qwen3.6, Ornith 1.5, Gemma 4 et Tiel Coder · gratuit et open source</p>
+Qwen3.8-Flash-Next, GLM 5.3 Flash, Qwen3.6, Ornith 1.5, Gemma 4, Tiel Coder et LFM2.5-24B-A2B · gratuit et open source</p>
 
 <p align="center"><img src="docs/media/speed.svg" width="820" alt="Tokens par seconde pendant l'écriture d'une réponse : 94 à 100 avec Qwen3.6-35B-A3B sur un portable à carte 8 Go, 385 à 393 sur une RTX 5090"></p>
 
@@ -17,15 +17,15 @@ Qwen3.8-Flash-Next, GLM 5.3 Flash, Qwen3.6, Ornith 1.5, Gemma 4 et Tiel Coder ·
 PolyStrata fait tourner de grands modèles d'IA sur un PC normal, des modèles qui demandent d'habitude un serveur.
 Ils discutent, écrivent du code et fonctionnent avec vos applications et vos agents de code. Rien ne quitte votre PC.
 
-Il fait tourner six modèles, avec deux moteurs :
+Il fait tourner sept modèles, avec deux moteurs :
 
 - **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** sur une carte graphique NVIDIA ou AMD
   de 12 Go ou plus, sous Windows ou Linux. Il lit aussi les images. Son moteur est celui de
   [Strata](https://github.com/Niko1221/Strata), inchangé.
 
-Les cinq autres tournent sur un moteur écrit pour PolyStrata, avec une carte NVIDIA ou [deux](docs/MULTI_GPU.md#the-strata-poly-models) : tous les cinq sous Linux, et
-les quatre plus petits aussi sous Windows. Ils sont expérimentaux : ils n'ont tourné que sur un seul PC avec une carte
-de 32 Go, et les quatre plus petits en plus sur un portable avec une carte de 8 Go.
+Les six autres tournent sur un moteur écrit pour PolyStrata, avec une carte NVIDIA ou AMD, ou [deux](docs/MULTI_GPU.md#the-strata-poly-models) : tous les six sous Linux, et
+Qwen3.6, Ornith 1.5, Gemma 4 et Tiel Coder aussi sous Windows. Ils sont expérimentaux : cinq d'entre eux n'ont tourné que sur un seul PC avec une carte
+de 32 Go, et ces quatre-là en plus sur un portable avec une carte de 8 Go.
 
 - **[GLM 5.3 Flash](docs/GLM.md)**, le plus grand : un fichier de 79 à 114 Go, dont la plus grande part reste en RAM.
 - **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, un fichier de 13 à 23 Go. Il lit aussi les images.
@@ -34,6 +34,8 @@ de 32 Go, et les quatre plus petits en plus sur un portable avec une carte de 8 
 - **[Gemma 4 26B-A4B](docs/BACKENDS.md)**, un fichier de 11 à 17 Go. Il lit aussi les images.
 - **[Tiel Coder 35B-A3B](docs/BACKENDS.md)**, Ornith 1.5 quantifié par peculiar-ragdoll pour les agents de code :
   un fichier de 14 à 23 Go. Il lit aussi les images.
+- **[LFM2.5-24B-A2B](docs/BACKENDS.md)**, un modèle à experts de LiquidAI : un fichier de 14 à 20 Go. Il ne lit pas
+  les images et n'a tourné que sur la carte AMD.
 
 Le serveur peut passer d'un modèle installé à un autre pendant qu'il tourne
 ([comment](docs/BACKENDS.md#changing-the-model), en anglais).
@@ -213,9 +215,11 @@ Mesuré de la même façon, sur les deux mêmes PC.
 
 Un prompt de 10,000 tokens est lu à 1,670 tokens/s sur le portable et à 6,300 sur la station de travail.
 
-Les cinq modèles du moteur propre à PolyStrata ont été mesurés avec son benchmark, que vous pouvez lancer sur votre
+Les quatre modèles mesurés sur les deux PC ci-dessus, Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4 26B-A4B et Tiel Coder
+35B-A3B, ont été mesurés avec le benchmark propre à PolyStrata, que vous pouvez lancer sur votre
 PC : `python polystrata.py benchmark --model <name> --prompt-tokens 24000`
 ([ce qu'il envoie et affiche](docs/BACKENDS.md#benchmark), en anglais).
+LFM2.5-24B-A2B a été mesuré sur une RX 9060 XT à la place ([AMD_HIP.md](docs/AMD_HIP.md#lfm25-24b-a2b-on-an-rx-9060-xt-gfx1200)).
 Ce que d'autres ont mesuré sur leurs cartes, et comment comparer avec llama.cpp sur la vôtre :
 [résultats de la communauté](docs/COMMUNITY_BENCHMARKS.md#the-models-polystrata-adds) (en anglais).
 Sur le portable, PolyStrata a lu les prompts 2.7 à 3.5 fois plus vite que llama.cpp b11540 et écrit 1.5 à 1.8
@@ -343,12 +347,12 @@ Il vous pose quelques questions :
 - s'il doit lire les images (GLM 5.3 Flash n'en lit pas).
 
 Appuyez sur Entrée à chaque fois pour garder la réponse recommandée. Ensuite il télécharge le modèle (environ 70 Go pour
-Qwen3.8-Flash-Next, 79 à 114 Go pour GLM 5.3 Flash, 11 à 24 Go pour les quatre autres)
+Qwen3.8-Flash-Next, 79 à 114 Go pour GLM 5.3 Flash, 11 à 24 Go pour les cinq autres)
 et le démarre. Si le téléchargement s'arrête, relancez-le : il reprend là où il s'était arrêté. Votre navigateur
 ouvre l'application PolyStrata à l'adresse `http://127.0.0.1:8080`.
 
-Les six figurent dans la liste des modèles de l'installeur. `./setup.sh --family glm`, `qwen36`, `ornith`,
-`gemma4` ou `tiel` mène directement à l'un d'eux ([ce qu'il demande et écrit](docs/GLM.md#install), en anglais).
+Les sept figurent dans la liste des modèles de l'installeur. `./setup.sh --family glm`, `qwen36`, `ornith`,
+`gemma4`, `tiel` ou `lfm2` mène directement à l'un d'eux ([ce qu'il demande et écrit](docs/GLM.md#install), en anglais).
 
 > **Pendant le démarrage du modèle, votre PC peut ralentir ou ne plus répondre pendant 1-3 minutes** (plus longtemps la première fois).
 > PolyStrata charge 35-55 Go dans votre RAM et en réserve une partie pour la carte graphique. C'est normal. Attendez, et
@@ -469,7 +473,7 @@ de l'installeur. Elles n'ont pas été vérifiées sur un tel PC.
 
 ## Utilisation
 
-Les six modèles s'utilisent de la même façon : la même application, la même API.
+Les sept modèles s'utilisent de la même façon : la même application, la même API.
 
 <p align="center"><img src="docs/media/runpagoda.png" width="900" alt="L'onglet Monitor de l'application PolyStrata à côté d'un agent de code"><br>
 <sub>Le <b>Monitor</b> de l'application PolyStrata (à gauche) pendant qu'un agent de code écrit le jardin de pagode de la vidéo (à droite). Une capture d'écran de <a href="https://github.com/Niko1221/Strata">Strata</a>.</sub></p>

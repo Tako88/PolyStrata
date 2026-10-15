@@ -18,14 +18,15 @@ a second machine, a Windows laptop whose card has 8 GB.
 | Ornith 1.5 35B-A3B | `qwen35moe` | `strata-poly` | APEX-MTP-I-Compact, I-Mini and I-Quality, 14.4 to 23.7 GB | draft block in the file |
 | Gemma 4 26B-A4B | `gemma4` | `strata-poly` | Unsloth UD-Q3_K_M, UD-Q2_K_XL and UD-Q4_K_M, 10.5 to 16.9 GB | its draft model, a file of 0.46 GB |
 | Tiel Coder 35B-A3B | `qwen35moe` | `strata-poly` | peculiar-ragdoll's UD-Q3_K_XL, UD-IQ3_XXS and UD-Q4_K_XL, 13.6 to 22.7 GB | draft block in the file |
+| LFM2.5-24B-A2B | `lfm2moe` | `strata-poly` | LiquidAI's Q4_K_M and Q6_K, 14.5 and 19.7 GB | guesses from repeats, no draft block |
 
 `strata` is the first engine and runs Qwen3.8 only; nothing in it changed. `strata-poly` is the engine that reads a
-GGUF in place, and it now has three architectures. It was called `strata-glm`, after its first model; an install
+GGUF in place, and it now has four architectures. It was called `strata-glm`, after its first model; an install
 from then keeps its engine and moves to the new name the next time setup updates it.
 
 ## Install
 
-Setup installs all six. The four new models are in its list of models, and each has a family name that goes
+Setup installs all seven. The five new models are in its list of models, and each has a family name that goes
 straight to it:
 
 ```bash
@@ -44,6 +45,10 @@ straight to it:
 ./setup.sh --family tiel
 ```
 
+```bash
+./setup.sh --family lfm2
+```
+
 | Family | Model | File | Download | RAM beside an 8 GB card (estimate) |
 | --- | --- | --- | --- | --- |
 | `qwen36` | Qwen3.6-35B-A3B | Unsloth UD-Q3_K_M | 17.1 GB | about 21 GB |
@@ -58,6 +63,8 @@ straight to it:
 | `tiel` | Tiel Coder 35B-A3B | UD-Q3_K_XL | 17.2 GB | about 21 GB |
 | | | UD-IQ3_XXS | 13.6 GB | about 18 GB |
 | | | UD-Q4_K_XL | 22.7 GB | about 27 GB |
+| `lfm2` | LFM2.5-24B-A2B | LiquidAI Q4_K_M | 14.5 GB | about 19 GB |
+| | | LiquidAI Q6_K | 19.7 GB | about 24 GB |
 
 A family's first size is the one setup takes. On a PC with less RAM than that wants it takes the second, the
 smallest, and the third is by name: `--model UD-Q4_K_M`, `--model APEX-I-QUALITY`, `--model UD-Q4_K_XL`. The
@@ -76,14 +83,18 @@ model. `--gguf-dir /folder/with/the/file` takes a file you already have; a draft
 downloaded to setup's own. The engine is compiled once for all of them. On the test machine, with the files on the
 disk, the first install took a minute, most of it the compile, and the other two 17 seconds each.
 
-On an AMD card this engine has a HIP build and setup compiles it there (`./setup.sh --backend hip`), for
-Qwen3.6-35B-A3B alone: the other families and every AMD card but the measured one are refused, because nothing of
-theirs was run on one. Two of the steps differ there - it does not offer the parked-conversation cache (never
-measured with the engine on an AMD card) and it writes `--vram-reserve-mib 2048`, the reserve the measured server
-runs needed at a long context. The numbers, the conditions and what was not tested:
-[AMD_HIP.md](AMD_HIP.md#qwen36-35b-a3b-on-an-rx-9060-xt-gfx1200-the-strata-poly-engine).
+On an AMD card this engine has a HIP build and setup compiles it there (`./setup.sh --backend hip`), for the sizes
+measured on the card: Qwen3.6-35B-A3B's three, Tiel Coder's `UD-Q4_K_XL` and LFM2.5-24B-A2B's two. Every other
+family, Tiel Coder's other two sizes and every AMD card but the measured one are refused, because nothing of theirs
+was run on one. Two of the steps differ there - it does not offer the parked-conversation
+cache (never measured with the engine on an AMD card) and it writes `--vram-reserve-mib 2048`, the reserve the
+measured server runs needed at a long context. The numbers, the conditions and what was not tested:
+[Qwen3.6](AMD_HIP.md#qwen36-35b-a3b-on-an-rx-9060-xt-gfx1200-the-strata-poly-engine),
+[Tiel Coder](AMD_HIP.md#tiel-coder-35b-a3b-the-first-poly-family-measured-here-besides-qwen36) and
+[LFM2.5-24B-A2B](AMD_HIP.md#lfm25-24b-a2b-on-an-rx-9060-xt-gfx1200).
 
-On Windows the three are installed the same way, with `START-HERE.bat` or `python setup.py` in place of
+On Windows Qwen3.6, Ornith 1.5, Gemma 4 and Tiel Coder are installed the same way, with `START-HERE.bat`
+or `python setup.py` in place of
 `./setup.sh`. There setup downloads `strata-poly` and its image encoder ready-made from the latest release when that
 release was built from the same source (`tools/make_poly_release.py`: RTX 20 to RTX 50 cards, CUDA 13.0, ggml's
 CPU code for AVX2), checks the archive against the SHA-256 GitHub publishes for it, and installs NVIDIA's CUDA 13
@@ -98,7 +109,8 @@ installs it there.
 Each install is a model of its own: `--list-models`, `/model` and the web page's list show all of them, and
 `./setup.sh --check` has a line for each with what this PC's card and RAM make of it.
 
-The four new models read pictures. Say yes to setup's question about images, or pass `--vision yes`:
+Qwen3.6, Ornith 1.5, Gemma 4 and Tiel Coder read pictures. Say yes to setup's question about images, or pass
+`--vision yes`:
 
 ```bash
 ./setup.sh --family gemma4 --vision yes
@@ -107,14 +119,16 @@ The four new models read pictures. Say yes to setup's question about images, or 
 Setup then downloads the model's image encoder too (0.9 GB, Gemma 4's 1.2 GB), compiles `strata-vision` beside
 the engine and writes both into the run config. On the GPU the encoder holds 1.6 GB of VRAM (Gemma 4's 2.4 GB),
 which a small card needs for the model, so on a card with less than 16 GB it runs on the CPU and a picture takes
-a few seconds. `--vision gpu` and `--vision cpu` choose the place. GLM 5.3 Flash reads no pictures.
+a few seconds. `--vision gpu` and `--vision cpu` choose the place. GLM 5.3 Flash and LFM2.5-24B-A2B read no
+pictures.
 
 The RAM column is the experts an 8 GB card does not hold, plus 10 GB for the rest. It is setup's estimate. The
 nine sizes ran on the [laptop](#on-a-laptop-with-8-gb-of-vram), which has 32 GB. The machine's RAM in use, 9 GiB
 with no model, was at most 22.5, 26.6 and 31.3 GiB with Qwen3.6's three sizes in the benchmark there, 23.9, 26.7
 and 31.4 with Ornith's and 22.6, 24.6 and 28.6 with Gemma 4's, of its 31.8. Tiel Coder's three, measured later
-with the engine of 1212621baadf, took it to 21.8, 24.9 and 29.9 GiB. Setup does not stop a PC below the 32 GB that
-Qwen3.8 needs when one of these families is named.
+with the engine of 1212621baadf, took it to 21.8, 24.9 and 29.9 GiB. LFM2.5-24B-A2B's two sizes were run on the
+AMD card instead ([AMD_HIP.md](AMD_HIP.md#lfm25-24b-a2b-on-an-rx-9060-xt-gfx1200)). Setup does not stop a PC below
+the 32 GB that Qwen3.8 needs when one of these families is named.
 
 ## How a backend works
 
@@ -145,7 +159,7 @@ writes one token and the server adds the two that llama.cpp puts around the rows
 - CUDA graphs for a token's fixed launches
 - the serve protocol, sampling, statistics
 
-An architecture is a class derived from `Engine` (`Glm5Next`, `Qwen35`, `Gemma4`). It supplies:
+An architecture is a class derived from `Engine` (`Glm5Next`, `Qwen35`, `Gemma4`, `Lfm2Moe`). It supplies:
 
 | Hook | What it does |
 | --- | --- |
@@ -185,6 +199,7 @@ key, so a model the engine cannot run is listed as unavailable with the reason i
 | `glm5-next`, `glm5next` | `Glm5Next` |
 | `qwen35moe` | `Qwen35` |
 | `gemma4` | `Gemma4` |
+| `lfm2moe` | `Lfm2Moe` |
 
 Within an architecture the shape comes from the file: layer counts, widths, head counts, expert counts, which
 layers have which attention, whether there is a draft block. Qwen3.6 and Ornith 1.5 are one class because their
@@ -1859,7 +1874,8 @@ Setup knows the files in the table above. Another file of one of these architect
    ```
 
    It writes `packs/<name>/tokenizer/` with the vocabulary, the merges and the model's chat template. Byte-level
-   BPE (`gpt2`: Qwen, GLM) and Gemma 4's `gemma4` are read.
+   BPE (`gpt2`: Qwen, GLM, LFM2.5) and Gemma 4's `gemma4` are read; LFM2.5's `lfm2` is the LLaMA-3
+   pre-tokenizer, whose text llama.cpp shares with ChatGLM4's.
 3. Write `strata-<name>.json` beside `setup.py`:
 
    ```json
@@ -1887,12 +1903,19 @@ Setup knows the files in the table above. Another file of one of these architect
 
 ## Limits
 
-- NVIDIA cards, and one AMD card for one model: Qwen3.6-35B-A3B UD-Q4_K_M on an RX 9060 XT (gfx1200,
-  ROCm 7.2.4) through this source's own HIP build - 1,212.5 tok/s on a 20,000-token prompt and 78.6 tok/s while it
-  writes at a 128K context, 1,184.0 and 88.5 at an 8K context with 2,000 tokens, medians of three runs; setup
-  compiles it there and refuses every other AMD card and every other model of this engine on AMD
-  ([AMD_HIP.md](AMD_HIP.md#qwen36-35b-a3b-on-an-rx-9060-xt-gfx1200-the-strata-poly-engine)). Built and run on one
-  Linux machine, and the three new models' nine sizes on one Windows laptop as well. GLM 5.3 Flash was not run on
+- NVIDIA cards, and one AMD card for the sizes measured there: Qwen3.6-35B-A3B UD-Q4_K_M, Tiel Coder 35B-A3B
+  UD-Q4_K_XL and LFM2.5-24B-A2B Q4_K_M and Q6_K on an RX 9060 XT
+  (gfx1200, ROCm 7.2.4) through this source's own HIP build. Qwen3.6 reads at 1,212.5 tok/s on a 20,000-token
+  prompt and writes at 78.6 tok/s at a 128K context, and 1,184.0 and 88.5 at an 8K context with 2,000 tokens,
+  medians of three runs; Tiel Coder's UD-Q4_K_XL keeps 4,116 of 10,496 experts in VRAM (7.3 GiB) with an answer its
+  own self-test passed; LFM2.5-24B-A2B's Q4_K_M reads at 1,903.5 and 2,211.2 tok/s (2,000- and 7,000-token
+  prompts) and writes at 80.6 at an 8K context, and reads at 2,117.6 and 1,822.2 (2,000 and 20,000) and writes at
+  77.0 at 128K, medians of three runs;
+  setup compiles it there and refuses every other AMD card and every other model or size of this engine on AMD
+  ([Qwen3.6](AMD_HIP.md#qwen36-35b-a3b-on-an-rx-9060-xt-gfx1200-the-strata-poly-engine),
+  [Tiel Coder](AMD_HIP.md#tiel-coder-35b-a3b-the-first-poly-family-measured-here-besides-qwen36),
+  [LFM2.5](AMD_HIP.md#lfm25-24b-a2b-on-an-rx-9060-xt-gfx1200)). Built and run on one Linux machine, and the four
+  smaller models' twelve sizes on one Windows laptop as well. GLM 5.3 Flash was not run on
   Windows. Two cards can share a model since 2026-10-11
   ([MULTI_GPU.md](MULTI_GPU.md#the-strata-poly-models)); that ran with Qwen3.6 and Gemma 4 on two RTX 3080
   under Linux only.

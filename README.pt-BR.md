@@ -3,7 +3,7 @@
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · **Português**
 
 <p align="center"><b>Rode modelos de IA grandes no seu próprio PC</b><br>
-Qwen3.8-Flash-Next, GLM 5.3 Flash, Qwen3.6, Ornith 1.5, Gemma 4 e Tiel Coder · gratuito e de código aberto</p>
+Qwen3.8-Flash-Next, GLM 5.3 Flash, Qwen3.6, Ornith 1.5, Gemma 4, Tiel Coder e LFM2.5-24B-A2B · gratuito e de código aberto</p>
 
 <p align="center"><img src="docs/media/speed.svg" width="820" alt="Tokens por segundo ao escrever uma resposta: 94 a 100 com o Qwen3.6-35B-A3B em um notebook com placa de 8 GB, 385 a 393 em uma RTX 5090"></p>
 
@@ -17,15 +17,15 @@ Qwen3.8-Flash-Next, GLM 5.3 Flash, Qwen3.6, Ornith 1.5, Gemma 4 e Tiel Coder · 
 O PolyStrata roda modelos de IA grandes num PC comum, modelos que normalmente precisam de um servidor.
 Eles conversam, escrevem código e funcionam com seus apps e agentes de programação. Nada sai do seu PC.
 
-Ele roda seis modelos, com dois motores:
+Ele roda sete modelos, com dois motores:
 
 - **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** numa placa de vídeo NVIDIA ou AMD de
   12 GB ou mais, no Windows ou no Linux. Ele também entende imagens. O motor dele é o do
   [Strata](https://github.com/Niko1221/Strata), sem mudanças.
 
-Os outros cinco usam um motor escrito para o PolyStrata, com uma placa NVIDIA ou [duas](docs/MULTI_GPU.md#the-strata-poly-models): os cinco no Linux, e os quatro menores
-também no Windows. São experimentais: só rodaram em um PC com uma placa de 32 GB, e os quatro menores também em um
-notebook com uma placa de 8 GB.
+Os outros seis usam um motor escrito para o PolyStrata, com uma placa NVIDIA ou AMD, ou [duas](docs/MULTI_GPU.md#the-strata-poly-models): os seis no Linux, e
+Qwen3.6, Ornith 1.5, Gemma 4 e Tiel Coder também no Windows. São experimentais: cinco deles só rodaram em um PC com uma placa de 32 GB, e
+esses quatro também em um notebook com uma placa de 8 GB.
 
 - **[GLM 5.3 Flash](docs/GLM.md)**, o maior: um arquivo de 79 a 114 GB, que fica na maior parte na RAM.
 - **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, um arquivo de 13 a 23 GB. Ele também entende imagens.
@@ -34,6 +34,8 @@ notebook com uma placa de 8 GB.
 - **[Gemma 4 26B-A4B](docs/BACKENDS.md)**, um arquivo de 11 a 17 GB. Ele também entende imagens.
 - **[Tiel Coder 35B-A3B](docs/BACKENDS.md)**, o Ornith 1.5 quantizado por peculiar-ragdoll para agentes de
   programação: um arquivo de 14 a 23 GB. Ele também entende imagens.
+- **[LFM2.5-24B-A2B](docs/BACKENDS.md)**, um modelo de especialistas da LiquidAI: um arquivo de 14 a 20 GB. Ele não
+  entende imagens e só rodou na placa AMD.
 
 O servidor pode trocar entre os modelos instalados enquanto está rodando
 ([como](docs/BACKENDS.md#changing-the-model), em inglês).
@@ -213,9 +215,11 @@ Medido do mesmo jeito, nos mesmos dois PCs.
 
 Um prompt de 10,000 tokens é lido a 1,670 tokens/s no notebook e a 6,300 na estação de trabalho.
 
-Os cinco modelos do motor próprio do PolyStrata foram medidos com o benchmark dele, que você pode rodar no seu PC:
+Os quatro modelos medidos nos dois PCs acima, Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4 26B-A4B e Tiel Coder
+35B-A3B, foram medidos com o benchmark próprio do PolyStrata, que você pode rodar no seu PC:
 `python polystrata.py benchmark --model <name> --prompt-tokens 24000`
 ([o que ele envia e mostra](docs/BACKENDS.md#benchmark), em inglês).
+LFM2.5-24B-A2B foi medido em uma RX 9060 XT em vez disso ([AMD_HIP.md](docs/AMD_HIP.md#lfm25-24b-a2b-on-an-rx-9060-xt-gfx1200)).
 O que outras pessoas mediram nas próprias placas, e como comparar com o llama.cpp na sua:
 [resultados da comunidade](docs/COMMUNITY_BENCHMARKS.md#the-models-polystrata-adds) (em inglês).
 No notebook, o PolyStrata leu os prompts de 2.7 a 3.5 vezes mais rápido que o llama.cpp b11540 e escreveu de
@@ -343,11 +347,11 @@ Ele faz algumas perguntas:
 - se ele deve entender imagens (o GLM 5.3 Flash não entende).
 
 Aperte Enter em cada uma para usar a resposta recomendada. Depois ele baixa o modelo (cerca de 70 GB para o
-Qwen3.8-Flash-Next, 79 a 114 GB para o GLM 5.3 Flash, 11 a 24 GB para os outros quatro) e o inicia.
+Qwen3.8-Flash-Next, 79 a 114 GB para o GLM 5.3 Flash, 11 a 24 GB para os outros cinco) e o inicia.
 Se o download parar, rode de novo: ele continua de onde parou. Seu navegador abre o app do PolyStrata em
 `http://127.0.0.1:8080`.
 
-Os seis estão na lista de modelos do instalador. `./setup.sh --family glm`, `qwen36`, `ornith`, `gemma4` ou `tiel` vai
+Os sete estão na lista de modelos do instalador. `./setup.sh --family glm`, `qwen36`, `ornith`, `gemma4`, `tiel` ou `lfm2` vai
 direto para um deles ([o que ele pergunta e grava](docs/GLM.md#install), em inglês).
 
 > **Enquanto o modelo inicia, seu PC pode ficar lento ou parar de responder por 1-3 minutos** (mais na primeira vez).
@@ -468,7 +472,7 @@ conferidas num PC assim.
 
 ## Como usar
 
-Os seis modelos são usados do mesmo jeito: o mesmo app, a mesma API.
+Os sete modelos são usados do mesmo jeito: o mesmo app, a mesma API.
 
 <p align="center"><img src="docs/media/runpagoda.png" width="900" alt="A aba Monitor do app PolyStrata ao lado de um agente de programação"><br>
 <sub>O <b>Monitor</b> do app PolyStrata (à esquerda) enquanto um agente de programação escreve o jardim com pagode do vídeo (à direita). Uma captura de tela do <a href="https://github.com/Niko1221/Strata">Strata</a>.</sub></p>

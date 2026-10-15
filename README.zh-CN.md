@@ -3,7 +3,7 @@
 [English](README.md) · **简体中文** · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md)
 
 <p align="center"><b>在你自己的电脑上运行大型 AI 模型</b><br>
-Qwen3.8-Flash-Next、GLM 5.3 Flash、Qwen3.6、Ornith 1.5、Gemma 4 和 Tiel Coder · 免费开源</p>
+Qwen3.8-Flash-Next、GLM 5.3 Flash、Qwen3.6、Ornith 1.5、Gemma 4、Tiel Coder 和 LFM2.5-24B-A2B · 免费开源</p>
 
 <p align="center"><img src="docs/media/speed.svg" width="820" alt="写回答时每秒的 token 数：8 GB 显存的笔记本上 Qwen3.6-35B-A3B 为 94 到 100，RTX 5090 上为 385 到 393"></p>
 
@@ -17,19 +17,20 @@ Qwen3.8-Flash-Next、GLM 5.3 Flash、Qwen3.6、Ornith 1.5、Gemma 4 和 Tiel Cod
 PolyStrata 能在普通电脑上运行通常要用服务器才能跑的大型 AI 模型。它们能聊天、写代码，还能配合你的应用和编程智能体一起工作。
 所有数据都留在你的电脑上。
 
-它能跑六个模型，用两个引擎：
+它能跑七个模型，用两个引擎：
 
 - **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**：12 GB 及以上的 NVIDIA 或 AMD 显卡，Windows 或
   Linux。它还能看图片。引擎是 Strata 项目的，没有改动。
 
-另外五个用的是为 PolyStrata 写的引擎，需要一张 NVIDIA 显卡，也可以用[两张](docs/MULTI_GPU.md#the-strata-poly-models)：五个都能在 Linux 上跑，四个小的也能在 Windows 上跑。
-目前是实验性的：只在一台 32 GB 显卡的电脑上跑过，四个小的另外在一台 8 GB 显卡的笔记本上跑过。
+另外六个用的是为 PolyStrata 写的引擎，需要一张 NVIDIA 或 AMD 显卡，也可以用[两张](docs/MULTI_GPU.md#the-strata-poly-models)：六个都能在 Linux 上跑，Qwen3.6、Ornith 1.5、Gemma 4 和 Tiel Coder 还能在 Windows 上跑。
+目前是实验性的：其中五个只在一台 32 GB 显卡的电脑上跑过，上面那四个另外在一台 8 GB 显卡的笔记本上跑过。
 
 - **[GLM 5.3 Flash](docs/GLM.md)**：最大的一个，文件 79 到 114 GB，大部分留在内存里。
 - **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**：文件 13 到 23 GB。它还能看图片。
 - **[Ornith 1.5](docs/BACKENDS.md)**：结构和 Qwen3.6-35B-A3B 相同，权重不同，文件 14 到 24 GB。它还能看图片。
 - **[Gemma 4 26B-A4B](docs/BACKENDS.md)**：文件 11 到 17 GB。它还能看图片。
 - **[Tiel Coder 35B-A3B](docs/BACKENDS.md)**：peculiar-ragdoll 为编程智能体量化的 Ornith 1.5，文件 14 到 23 GB。它还能看图片。
+- **[LFM2.5-24B-A2B](docs/BACKENDS.md)**：LiquidAI 的专家混合模型，文件 14 到 20 GB。不能看图片，目前只在 AMD 显卡上跑过。
 
 服务器运行时可以在已安装的模型之间切换（[做法](docs/BACKENDS.md#changing-the-model)，英文）。
 
@@ -204,9 +205,10 @@ GLM 5.3 Flash 比其他几个模型大得多，这张卡的 32 GB 显存只放�
 
 10,000 个 token 的提示，笔记本每秒读 1,670 个，工作站每秒读 6,300 个。
 
-用 PolyStrata 自己引擎的这五个模型，都是用它自带的跑分测的，你也可以在自己的电脑上跑：
+上面两台电脑上测过的四个模型，Qwen3.6-35B-A3B、Ornith 1.5、Gemma 4 26B-A4B 和 Tiel Coder 35B-A3B，都是用 PolyStrata 自带的跑分测的，你也可以在自己的电脑上跑：
 `python polystrata.py benchmark --model <name> --prompt-tokens 24000`
 （[它发什么、打印什么](docs/BACKENDS.md#benchmark)，英文）。
+LFM2.5-24B-A2B 则是在 RX 9060 XT 上测的（[AMD_HIP.md](docs/AMD_HIP.md#lfm25-24b-a2b-on-an-rx-9060-xt-gfx1200)，英文）。
 别人在自己的显卡上测的结果，以及怎么在你的电脑上和 llama.cpp 对比：
 [社区测试结果](docs/COMMUNITY_BENCHMARKS.md#the-models-polystrata-adds)（英文）。
 在笔记本上跑 Qwen3.6 和 Tiel Coder，PolyStrata 读提示比 llama.cpp b11540 快 2.7 到 3.5 倍，写快 1.5 到 1.8 倍
@@ -327,10 +329,10 @@ PolyStrata 的 [MCP 服务器](docs/MCP_SERVER.md)来安装、启动和停止 Po
 - 上下文多大（模型能记住多少文字），
 - 是否要识别图片（GLM 5.3 Flash 不支持）。
 
-每次直接按回车就是推荐选项。之后它会下载模型（Qwen3.8-Flash-Next 约 70 GB，GLM 5.3 Flash 79 到 114 GB，另外四个 11 到 24 GB）并启动。
+每次直接按回车就是推荐选项。之后它会下载模型（Qwen3.8-Flash-Next 约 70 GB，GLM 5.3 Flash 79 到 114 GB，另外五个 11 到 24 GB）并启动。
 如果下载中断了，再运行一次即可：它会从中断的地方继续。浏览器会打开 PolyStrata 应用，地址是 `http://127.0.0.1:8080`。
 
-六个模型都在安装程序的模型列表里。想直接装其中一个，运行 `./setup.sh --family glm`（或 `qwen36`、`ornith`、`gemma4`、`tiel`）
+七个模型都在安装程序的模型列表里。想直接装其中一个，运行 `./setup.sh --family glm`（或 `qwen36`、`ornith`、`gemma4`、`tiel`、`lfm2`）
 （[它会问什么、写什么](docs/GLM.md#install)）。
 
 > **模型启动时，你的电脑可能会变慢或卡住 1-3 分钟**（第一次最久）。
@@ -445,7 +447,7 @@ GLM 5.3 Flash 的其他量化版本暂时不支持：[还缺什么](docs/GLM.md#
 
 ## 使用方法
 
-六个模型的用法一样：同一个应用，同一套 API。
+七个模型的用法一样：同一个应用，同一套 API。
 
 <p align="center"><img src="docs/media/runpagoda.png" width="900" alt="应用的 Monitor 标签页，旁边是一个编程智能体"><br>
 <sub>应用的 <b>Monitor</b>（左），编程智能体正在写视频里的宝塔花园（右）。截图来自 <a href="https://github.com/Niko1221/Strata">Strata</a>。</sub></p>

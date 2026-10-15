@@ -8,7 +8,7 @@ cards](#community-validated-cards)); the RX 6800 / 6900 series (RDNA2, gfx1030) 
 install steps for users are in [INSTALL.md](INSTALL.md#amd-cards). gfx906 (Instinct MI50 / MI60, Radeon VII; wave64) has a separate
 opt-in build, see [gfx906](#gfx906-instinct-mi50--mi60-radeon-vii-wave64-built-from-source). The Ryzen AI Max "Strix Halo" APU (gfx1151, RDNA3.5, unified memory) is built from source on Linux: see [STRIX_HALO.md](STRIX_HALO.md). Other AMD architectures and mixed
 AMD/NVIDIA execution in one run are not supported. The second engine, the one that reads a GGUF in place
-(Qwen3.6-35B-A3B and the four models beside it), also builds and runs here, measured on an RX 9060 XT:
+(Qwen3.6-35B-A3B and the five models beside it), also builds and runs here, measured on an RX 9060 XT:
 [Qwen3.6-35B-A3B on an RX 9060 XT](#qwen36-35b-a3b-on-an-rx-9060-xt-gfx1200-the-strata-poly-engine).
 
 The backend maps the CUDA-shaped runtime and BLAS calls to HIP/hipBLAS, uses
@@ -402,12 +402,13 @@ and compare the prompt speed with and without it).
 
 ## Qwen3.6-35B-A3B on an RX 9060 XT (gfx1200): the `strata-poly` engine
 
-The second engine, the one that reads a GGUF in place ([the five models](BACKENDS.md#what-runs)), is this same
-source compiled with `-DSTRATA_POLY_HIP=ON`, and it has run on this card. What has been measured there is one
-model on one card, **Qwen3.6-35B-A3B UD-Q4_K_M**, and everything below is that measurement - the medians of three
-runs on a quiet machine, or one benchmark through the server. Setup compiles it there and refuses every other AMD
-card and every other model of this engine on AMD (`--check` says which and why): their files, their weights and
-their cache shapes were not run on one.
+The second engine, the one that reads a GGUF in place ([the six models](BACKENDS.md#what-runs)), is this same
+source compiled with `-DSTRATA_POLY_HIP=ON`, and it has run on this card. What has been measured there is three
+models' sizes on one card: **Qwen3.6-35B-A3B UD-Q4_K_M**, **Tiel Coder 35B-A3B UD-Q4_K_XL** further down and
+**LFM2.5-24B-A2B** further still; everything from here to the Tiel Coder section is the Qwen3.6 measurement - the
+medians of three runs on a quiet machine, or one benchmark through the server. Setup compiles it there for the
+sizes measured on the card and refuses every other AMD card and every other model or size of this engine on AMD
+(`--check` says which and why): their files, their weights and their cache shapes were not run on one.
 
 | | |
 |---|---|
@@ -625,8 +626,9 @@ curve stops where it is still usable. Measured on this card, the same engine and
 
 ### Tiel Coder 35B-A3B, the first poly family measured here besides Qwen3.6
 
-Setup refuses the `ornith`, `gemma4` and `tiel` families on AMD because none had been measured there, not
-because their engine cannot run: all three are `qwen35moe`/`gemma4` on the same `strata-poly` build this card already runs.
+Setup installs Tiel Coder's `UD-Q4_K_XL` on AMD; the `ornith` and `gemma4` families, and Tiel Coder's other two
+sizes, are refused there because none had been measured, not because their engine cannot run: all are
+`qwen35moe`/`gemma4` on the same `strata-poly` build this card already runs.
 Measured on 2026-10-13, the same card and build as the ramps above, 32 GB of RAM, the desktop up: Tiel Coder's
 `UD-Q4_K_XL` file (22.75 GB, the sha `setup.py` pins) loads with **4,116 of 10,496 experts in VRAM
 (7.3 GiB)**, RSS 23.2 GiB, and no unsupported-quant report — its experts are Q4_K with Q5_K/Q6_K where they write,
@@ -648,13 +650,59 @@ answer compiled, ran its own 200,000-operation self-test and matched all 25, whe
 used above its declaration) and, with that line moved, core-dumped in its own self-test.  One sample each at the
 config's sampling, so the quality difference is suggested, not established.
 
-Until setup accepts the family on this card, the file can be fetched by hand from
+For a size setup does not install on this card, the file can be fetched by hand from
 `peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP`, its tokenizer extracted with
 `tools/strata_tokenizer.py --gguf FILE --out packs/tiel-coder-35b-a3b` (`STRATA_GGUF_PY=third_party/llama.cpp/gguf-py`),
 and a config written beside the qwen36 one pointing `exe` at `engine-poly/strata-poly`.
 
 **Not tested:** vision (the mmproj), the MTP draft's own quality, a long-context soak, the i-quant sizes
 (`UD-Q3_K_XL`, `UD-IQ3_XXS`), any other AMD arch, and the `ornith` and `gemma4` families, which stay unmeasured.
+
+### LFM2.5-24B-A2B on an RX 9060 XT (gfx1200)
+
+The second poly family setup installs on this card: `./setup.sh --backend hip --family lfm2`, LiquidAI's two GGUFs
+from one pinned revision, Q4_K_M (14.5 GB, the default) and Q6_K (19.7 GB), both with `hip_archs = gfx1200` and
+the 2048 MiB reserve above. It is llama.cpp's `lfm2moe`: 40 layers, 30 short convolutions and 10 attention layers,
+layers 2 to 39 top-4 of 64 routed experts by sigmoid plus a per-expert selection bias, the first two layers dense,
+no shared expert, no draft block. It reads no pictures. Measured at contexts of 8,192 and 131,072; setup installs
+32,768.
+
+Measured on the machine above, this branch's engine, medians of three warm runs
+(`.pi/plans/lfm2moe/bench-lfm2.py --gguf <file> --tokenizer <pack>/tokenizer --label <size> --max-context
+<8192|131072> --prompts <2000,7000|2000,20000> --reps 3`; the engine's args `--max-context <ctx> --threads 12
+--tail-skip 0 --vram-reserve-mib 2048 --conversation-cache-mib 0`, the guessed-token window and the `--lookup`
+repeats on):
+
+| size | context | prompt read | answer write | peak VRAM | experts in VRAM | load |
+| --- | ---: | --- | ---: | ---: | --- | ---: |
+| Q4_K_M | 8,192 | 1,903.5 tok/s (2,000 tokens) · 2,211.2 (7,000) | 80.6 tok/s (200) | 14,399 MiB | 2,038 / 2,432 (10.8 GiB) | 1.9 s |
+| Q4_K_M | 131,072 | 2,117.6 (2,000) · 1,822.2 (20,000) | 77.0 | 14,634 MiB | 2,050 / 2,432 (10.9 GiB) | 1.8 s |
+| Q6_K | 8,192 | 1,114.6 (2,000) · 1,477.5 (7,000) | 56.4 | 14,361 MiB | 1,473 / 2,432 (10.6 GiB) | 1.8 s |
+| Q6_K | 131,072 | 1,120.1 (2,000) · 1,377.7 (20,000) | 56.6 | 14,642 MiB | 1,473 / 2,432 (10.6 GiB) | 1.8 s |
+
+The peak VRAM is the card's `mem_info_vram_used`, sampled every 0.25 s; the experts and the load time are the
+engine's own lines. The arithmetic before the measurement expected about 35 % of each token's expert weight on the
+CPU and single-digit tokens/s for Q6_K; measured, that was **wrong**: the engine keeps 1,473 of 2,432 Q6_K experts
+in VRAM (10.6 GiB) and writes at 56.4 to 56.6 tok/s.
+
+**Parity against llama.cpp build 11548**, the HIP build on this card. `tools/parity_llama.py` feeds the same
+integer token ids to both, greedy, llama.cpp's default penalties off, `--tail-skip 0` and the environment cleared
+so no dropped expert moves an id. On Q4_K_M the engine's generated ids are **identical** to llama.cpp's, 64 of 64
+on a 6-token prompt with `--window 1` and with the default window of 8 and `--lookup 3`, and 20 of 20 on a
+1,200-token prompt (both windows) before a documented near-tie at step 20: llama `20:0.3114` against `589:0.2318`,
+the engine `589:0.3126` against `20:0.2602` - the same two candidates, swapped, on a flat distribution the
+reference itself cannot separate. Q6_K is **reported, not claimed**: the only reference this 16 GB card allows is
+llama.cpp on the CPU, because `-ngl 99` aborts with `allocating 18769.41 MiB on device 0: cudaMalloc failed: out
+of memory`. There the engine's own two expert placements disagree with each other at the same step as the
+reference disagrees with the engine (step 2, the step at which llama.cpp's own GPU-vs-CPU control flips too, on a
+top pair near 0.32) - the expert-placement noise, not the architecture. On Q4_K_M the engine with
+`--no-gpu-experts` flips at step 6 while the engine with the expert cache matches 64 of 64; two engine modes
+disagreeing on the same prompt is an **open finding for the maintainer**, recorded rather than decided by this
+change. The full runs, the margins and the reasoning are in `.pi/plans/lfm2moe/evidence.md`.
+
+**Not tested:** Windows, multi-GPU, CUDA (this machine has no NVIDIA card), vision (the model reads no pictures),
+the other quantizations (Q5_K_M, Q8_0, BF16, QAD-Q4_0), the 8B-A1B and every other LFM2 file, any other AMD arch,
+and a long 128K soak.
 
 ### What was not tested
 
@@ -672,8 +720,9 @@ and a config written beside the qwen36 one pointing `exe` at `engine-poly/strata
   offer it on an AMD card for that reason.
 - **Other AMD cards, other ROCm versions, other quantizations of this model.** One card (gfx1200) on ROCm 7.2.4
   with UD-Q4_K_M is the whole of it. Setup refuses the rest.
-- **The engine's other four models** - GLM 5.3 Flash, Ornith 1.5, Gemma 4 26B-A4B, Tiel Coder - on an AMD card,
-  and images on one: the encoder is the CPU build, and nothing with it and this engine was measured.
+- **The engine's other models and sizes** - GLM 5.3 Flash, Ornith 1.5, Gemma 4 26B-A4B and Tiel Coder's other two
+  sizes - on an AMD card, and images on one: the encoder is the CPU build, and nothing with it and this engine was
+  measured.
 - **CUDA.** This port left the CUDA build of the engine unchanged and does not build or run it here: this machine
   has no NVIDIA card and no CUDA toolkit.
 

@@ -82,14 +82,20 @@ By the PC's RAM (ask the user whether they mainly want it for code - then the Co
 32 GB, 96 GB of RAM or more, a 114 GB download, no images. Take it only when the user asks for it, and read
 [GLM.md](GLM.md) first.
 
-`--family qwen36`, `--family ornith` and `--family gemma4` (Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4 26B-A4B) are
-smaller models on GLM's engine, and experimental too: Linux or Windows, one NVIDIA card, an 11 to 24 GB download,
-about 15 to 28 GB of RAM beside an 8 GB card by setup's estimate, by size. On Windows setup compiles the engine
-(the CUDA Toolkit and Visual Studio's 2022 compiler, which it offers to install). They read pictures with
-`--vision yes` (about 1 GB more to download; the encoder runs on the CPU of a card with less than 16 GB). Each
-has three sizes. Leave `--model` out: setup takes UD-Q3_K_M (APEX-I-COMPACT for Ornith), or the smallest on a PC
-with too little RAM for it. The largest is by name, `--model UD-Q4_K_M` or `--model APEX-I-QUALITY`.
+`--family qwen36`, `--family ornith`, `--family gemma4` and `--family tiel` (Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4
+26B-A4B, Tiel Coder 35B-A3B) are smaller models on GLM's engine, and experimental too: Linux or Windows, one NVIDIA
+card, an 11 to 24 GB download, about 15 to 28 GB of RAM beside an 8 GB card by setup's estimate, by size. On
+Windows setup compiles the engine (the CUDA Toolkit and Visual Studio's 2022 compiler, which it offers to install).
+They read pictures with `--vision yes` (about 1 GB more to download; the encoder runs on the CPU of a card with
+less than 16 GB). Each has three sizes; Tiel Coder also runs on one AMD card, its `UD-Q4_K_XL` size. Leave
+`--model` out: setup takes UD-Q3_K_M (APEX-I-COMPACT for Ornith), or the smallest on a PC with too little RAM for
+it. The largest is by name, `--model UD-Q4_K_M` or `--model APEX-I-QUALITY`.
 Take one only when the user asks for it; [BACKENDS.md](BACKENDS.md#install) has what was measured.
+
+`--family lfm2` (LFM2.5-24B-A2B) is another smaller model on GLM's engine, also experimental: two sizes (14.5 and
+19.7 GB, about 19 and 24 GB of RAM beside an 8 GB card by setup's estimate), no images, and one AMD card only so
+far (no Windows) - [AMD_HIP.md](AMD_HIP.md#lfm25-24b-a2b-on-an-rx-9060-xt-gfx1200) has what was measured. Take it
+only when the user asks for it.
 
 ## 4. Run setup without questions
 

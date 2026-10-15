@@ -52,14 +52,21 @@ times as fast (the two runs are linked there).
 
 ### Does it run on Radeon / AMD?
 
-Qwen3.6-35B-A3B does, on one card so far. An RX 9060 XT (gfx1200) with ROCm 7.2.4 runs its UD-Q4_K_M file
-through this engine's own HIP build: 1,184 tokens/s on a 2,000-token prompt and 88.5 tokens/s while it writes, at
-an 8K context, and 1,212.5 and 78.6 at 128K with a 20,000-token prompt (medians of three runs). Setup installs it
-- `./setup.sh --backend hip --family qwen36` - and the web app and the OpenAI API work on the card
-([the measurement, its conditions and what was not tested](AMD_HIP.md#qwen36-35b-a3b-on-an-rx-9060-xt-gfx1200-the-strata-poly-engine)).
-The engine's other four models (GLM 5.3 Flash, Ornith 1.5, Gemma 4 26B-A4B, Tiel Coder) and every other AMD card
-are refused for now: nothing of theirs has been run on one. On a Radeon with 12 GB or more, PolyStrata also runs
-Qwen3.8-Flash-Next through Strata's AMD backend.
+Qwen3.6-35B-A3B and LFM2.5-24B-A2B do, and Tiel Coder's UD-Q4_K_XL size, on one card so far. An RX 9060 XT
+(gfx1200) with ROCm 7.2.4 runs Qwen3.6's UD-Q4_K_M file through this engine's own HIP build: 1,184 tokens/s on a
+2,000-token prompt and 88.5 tokens/s while it writes, at an 8K context, and 1,212.5 and 78.6 at 128K with a
+20,000-token prompt (medians of three runs). The same card runs LFM2.5-24B-A2B: its Q4_K_M file reads at 1,903.5
+and 2,211.2 tokens/s (2,000- and 7,000-token prompts) and writes at 80.6 at an 8K context, and reads at 2,117.6
+and 1,822.2 (2,000 and 20,000) and writes at 77.0 at 128K (medians of three runs). Tiel Coder's UD-Q4_K_XL also
+ran there, keeping 4,116 of 10,496 experts in VRAM (7.3 GiB) with an answer its own self-test passed.
+Setup installs those - `./setup.sh --backend hip --family qwen36`, `--family lfm2`, or `--family tiel --model
+UD-Q4_K_XL` - and the web app and the OpenAI
+API work on the card ([the Qwen3.6 measurement](AMD_HIP.md#qwen36-35b-a3b-on-an-rx-9060-xt-gfx1200-the-strata-poly-engine),
+[Tiel Coder's](AMD_HIP.md#tiel-coder-35b-a3b-the-first-poly-family-measured-here-besides-qwen36),
+[the LFM2.5 one](AMD_HIP.md#lfm25-24b-a2b-on-an-rx-9060-xt-gfx1200)). The engine's other models (GLM 5.3 Flash,
+Ornith 1.5, Gemma 4 26B-A4B, and Tiel Coder's other two sizes) and every other AMD card are refused for now:
+nothing of theirs has been run on one. On a Radeon with 12 GB or more, PolyStrata also runs Qwen3.8-Flash-Next
+through Strata's AMD backend.
 
 ### Will it run on a 6 GB card, or 4 GB?
 
@@ -78,7 +85,8 @@ experimental build for older cards, but that is for Qwen3.8-Flash-Next only
 
 This engine helps MoE models that don't fit in VRAM. A dense model like Bonsai uses all its weights for every
 token, so there are no experts to split, and the 1-bit Bonsai models already fit on a small card. LFM2.5's MoE
-(8B-A1B) fits whole on an 8 GB card, so plain llama.cpp is fine there; it could help on 2 to 4 GB cards.
+(8B-A1B) fits whole on an 8 GB card, so plain llama.cpp is fine there; it could help on 2 to 4 GB cards. The larger
+LFM2.5-24B-A2B is now in the installer (`--family lfm2`).
 Bigger MoEs are the good fit: Ling-2.6-flash (104B, 7.4B active) and DeepSeek V4 Flash are both on the list.
 Requests go in the issues, and the ones people ask for most come first.
 

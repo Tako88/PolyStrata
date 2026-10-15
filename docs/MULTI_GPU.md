@@ -13,7 +13,7 @@ is every card's share and skips those probes; there is no per-card setting yet.
 
 Most of this page is about the engine of Qwen3.8-Flash-Next. The models of the strata-poly engine (Qwen3.6, Gemma 4,
 Ornith, Tiel Coder, GLM 5.3 Flash) split their layers as well, more simply: see
-[The strata-poly models](#the-strata-poly-models).
+[The strata-poly models](#the-strata-poly-models). Multi-GPU is untested for LFM2.5-24B-A2B.
 
 ## Using it
 
@@ -340,8 +340,9 @@ pipelines them through the cards: see [BATCHING.md](BATCHING.md).
 
 ## The strata-poly models
 
-Qwen3.6, Gemma 4, Ornith, Tiel Coder and GLM 5.3 Flash run on the strata-poly engine, which splits a model's layers
-across cards too. Each card runs a range of layers and keeps the routed experts of those layers in its VRAM, as many
+Qwen3.6, Gemma 4, Ornith, Tiel Coder, GLM 5.3 Flash and LFM2.5-24B-A2B run on the strata-poly engine, which splits
+a model's layers across cards too (multi-GPU is untested for LFM2.5-24B-A2B). Each card runs a range of layers and
+keeps the routed experts of those layers in its VRAM, as many
 as fit. The last card also runs the output and the draft block, or Gemma 4's draft model. After its layers a card
 copies the rows of the tokens it read into pinned RAM, and the next card reads them from there: one row of the
 model's width a token, 8 KB for Qwen3.6. No NVLink or peer-to-peer access is needed.

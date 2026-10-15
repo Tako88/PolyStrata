@@ -3,7 +3,7 @@
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · **Deutsch** · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md)
 
 <p align="center"><b>Große KI-Modelle auf deinem eigenen PC</b><br>
-Qwen3.8-Flash-Next, GLM 5.3 Flash, Qwen3.6, Ornith 1.5, Gemma 4 und Tiel Coder · kostenlos und Open Source</p>
+Qwen3.8-Flash-Next, GLM 5.3 Flash, Qwen3.6, Ornith 1.5, Gemma 4, Tiel Coder und LFM2.5-24B-A2B · kostenlos und Open Source</p>
 
 <p align="center"><img src="docs/media/speed.svg" width="820" alt="Tokens pro Sekunde beim Schreiben einer Antwort: 94 bis 100 mit Qwen3.6-35B-A3B auf einem Laptop mit 8-GB-Karte, 385 bis 393 auf einer RTX 5090"></p>
 
@@ -17,15 +17,15 @@ Qwen3.8-Flash-Next, GLM 5.3 Flash, Qwen3.6, Ornith 1.5, Gemma 4 und Tiel Coder �
 PolyStrata lässt große KI-Modelle auf einem normalen PC laufen, Modelle, die sonst meist einen Server brauchen.
 Sie chatten, schreiben Code und arbeiten mit deinen Apps und Coding-Agents zusammen. Nichts verlässt deinen PC.
 
-Es lässt sechs Modelle laufen, auf zwei Engines:
+Es lässt sieben Modelle laufen, auf zwei Engines:
 
 - **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** auf einer NVIDIA- oder AMD-Grafikkarte
   ab 12 GB, unter Windows oder Linux. Es versteht auch Bilder. Seine Engine ist die von
   [Strata](https://github.com/Niko1221/Strata), unverändert.
 
-Die anderen fünf laufen auf einer Engine, die für PolyStrata geschrieben wurde, mit einer NVIDIA-Karte oder [zwei](docs/MULTI_GPU.md#the-strata-poly-models): alle fünf
-unter Linux, die vier kleineren auch unter Windows. Sie sind experimentell: Sie sind bisher auf einem einzigen PC mit
-einer 32-GB-Karte gelaufen, die vier kleineren außerdem auf einem Laptop mit einer 8-GB-Karte.
+Die anderen sechs laufen auf einer Engine, die für PolyStrata geschrieben wurde, mit einer NVIDIA- oder AMD-Karte oder [zwei](docs/MULTI_GPU.md#the-strata-poly-models): alle sechs
+unter Linux, Qwen3.6, Ornith 1.5, Gemma 4 und Tiel Coder auch unter Windows. Sie sind experimentell: Fünf von ihnen sind bisher auf einem einzigen PC mit
+einer 32-GB-Karte gelaufen, die genannten vier außerdem auf einem Laptop mit einer 8-GB-Karte.
 
 - **[GLM 5.3 Flash](docs/GLM.md)**, das größte: eine Datei von 79 bis 114 GB, die zum größten Teil im RAM bleibt.
 - **[Qwen3.6-35B-A3B](docs/BACKENDS.md)**, eine Datei von 13 bis 23 GB. Es versteht auch Bilder.
@@ -34,6 +34,8 @@ einer 32-GB-Karte gelaufen, die vier kleineren außerdem auf einem Laptop mit ei
 - **[Gemma 4 26B-A4B](docs/BACKENDS.md)**, eine Datei von 11 bis 17 GB. Es versteht auch Bilder.
 - **[Tiel Coder 35B-A3B](docs/BACKENDS.md)**, Ornith 1.5, von peculiar-ragdoll für Coding-Agents quantisiert:
   eine Datei von 14 bis 23 GB. Es versteht auch Bilder.
+- **[LFM2.5-24B-A2B](docs/BACKENDS.md)**, ein Mixture-of-Experts von LiquidAI: eine Datei von 14 bis 20 GB. Es
+  versteht keine Bilder und ist nur auf der AMD-Karte gelaufen.
 
 Der Server kann im laufenden Betrieb zwischen installierten Modellen wechseln
 ([wie](docs/BACKENDS.md#changing-the-model), englisch).
@@ -215,9 +217,11 @@ Genauso gemessen, auf denselben zwei PCs.
 
 Ein Prompt von 10,000 Tokens wird auf dem Laptop mit 1,670 Tokens/s gelesen und auf der Workstation mit 6,300.
 
-Die fünf Modelle der eigenen Engine von PolyStrata wurden mit ihrem Benchmark gemessen, den du auch auf deinem PC
+Die vier Modelle, die auf den beiden PCs oben gemessen wurden, Qwen3.6-35B-A3B, Ornith 1.5, Gemma 4 26B-A4B und Tiel Coder
+35B-A3B, wurden mit dem eigenen Benchmark von PolyStrata gemessen, den du auch auf deinem PC
 laufen lassen kannst: `python polystrata.py benchmark --model <name> --prompt-tokens 24000`
 ([was er schickt und ausgibt](docs/BACKENDS.md#benchmark), englisch).
+LFM2.5-24B-A2B wurde stattdessen auf einer RX 9060 XT gemessen ([AMD_HIP.md](docs/AMD_HIP.md#lfm25-24b-a2b-on-an-rx-9060-xt-gfx1200)).
 Was andere auf ihren eigenen Karten gemessen haben und wie du auf deinem PC mit llama.cpp vergleichst:
 [Ergebnisse aus der Community](docs/COMMUNITY_BENCHMARKS.md#the-models-polystrata-adds) (englisch).
 Auf dem Laptop las PolyStrata Prompts 2.7- bis 3.5-mal so schnell wie llama.cpp b11540 und schrieb 1.5- bis
@@ -345,11 +349,11 @@ dafür ein. Er stellt dir ein paar Fragen:
 - ob es Bilder lesen soll (GLM 5.3 Flash liest keine).
 
 Drück jedes Mal Enter, um die empfohlene Antwort zu nehmen. Dann lädt er das Modell herunter (etwa 70 GB für
-Qwen3.8-Flash-Next, 79 bis 114 GB für GLM 5.3 Flash, 11 bis 24 GB für die anderen vier) und
+Qwen3.8-Flash-Next, 79 bis 114 GB für GLM 5.3 Flash, 11 bis 24 GB für die anderen fünf) und
 startet es. Bricht der Download ab, starte ihn einfach neu: Er macht dort weiter, wo er aufgehört hat. Dein Browser
 öffnet die PolyStrata-App unter `http://127.0.0.1:8080`.
 
-Alle sechs stehen in der Modellliste des Installers. `./setup.sh --family glm`, `qwen36`, `ornith`, `gemma4` oder `tiel` führt
+Alle sieben stehen in der Modellliste des Installers. `./setup.sh --family glm`, `qwen36`, `ornith`, `gemma4`, `tiel` oder `lfm2` führt
 direkt zu einem davon ([was er fragt und schreibt](docs/GLM.md#install), englisch).
 
 > **Während das Modell startet, kann dein PC 1-3 Minuten langsam sein oder nicht reagieren** (beim ersten Mal am
@@ -472,7 +476,7 @@ solchen PC wurden sie nicht geprüft.
 
 ## So benutzt du es
 
-Alle sechs Modelle benutzt du gleich: dieselbe App, dieselbe API.
+Alle sieben Modelle benutzt du gleich: dieselbe App, dieselbe API.
 
 <p align="center"><img src="docs/media/runpagoda.png" width="900" alt="Der Monitor-Tab der PolyStrata-App neben einem Coding-Agent"><br>
 <sub>Der <b>Monitor</b> der PolyStrata-App (links), während ein Coding-Agent den Pagodengarten aus dem Video schreibt (rechts). Ein Screenshot aus <a href="https://github.com/Niko1221/Strata">Strata</a>.</sub></p>
