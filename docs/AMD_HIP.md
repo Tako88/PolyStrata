@@ -200,6 +200,15 @@ sizes itself automatically and leaves 1 GiB of VRAM headroom.
 GPU memory to system RAM (GTT), the OOM killer then ends KWin/plasmashell or `systemd-oomd` ends apps, or the
 compositor fails with "Failed to pin framebuffer with error -12".
 
+`STRATA_VRAM_FREE_FROM=card` sizes the expert cache on the card's own free VRAM instead of `hipMemGetInfo`'s, which
+counts this process alone: with a 2048 MiB Vulkan client holding VRAM the engine read 4356 MiB free where the card had
+1409, and a load sized on that figure left the card 786 MiB against the 2560 MiB reserve it had promised.  Measured on
+an RX 9060 XT with the desktop holding 1890 MiB, same flags and machine: **4046 experts** (7.2 GiB) from the runtime's
+figure against **3026** (5.4 GiB) from the card's, the difference being VRAM the desktop had; at 128K, a 2560 MiB
+reserve ended a full 129,016-token context with **2613 MiB** on the card against **990**, at the same read speed
+(270.0 against 269.8 tok/s) (`.pi/plans/poly-hip/m25-128k.txt`, `m27-128k.txt`).  Unset, or
+`STRATA_VRAM_FREE_FROM=runtime`, keeps the runtime's figure; CUDA always reads `cudaMemGetInfo`.
+
 The installer supports this backend (see "Install with setup" above). Images run through the CPU encoder for now (`--vision cpu`).
 Setup installs one AMD card, or several with `--gpus` (the engine's layer split; see RDNA4 below).
 

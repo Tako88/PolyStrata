@@ -41,6 +41,17 @@ struct Options {
     int max_context = 8192;
     int threads = 0;              ///< 0: the CPUs this process may use
     int vram_reserve_mib = -1;    ///< left free after the expert cache is filled; below 0: by the card's size
+    int vram_free_from = -1;      ///< where the free-VRAM figures come from.  -1: the default, hipMemGetInfo's on
+                                  ///< this stack.  0: always the runtime's.  1: the card's own, every client
+                                  ///< counted (STRATA_VRAM_FREE_FROM=card|runtime).  On this stack hipMemGetInfo
+                                  ///< counts this process alone -- engine 4356 MiB against a card with 1409 MiB
+                                  ///< beside a 2048 MiB Vulkan client -- and a load sized on it left the card 786
+                                  ///< MiB against the 2560 MiB reserve it had promised; sized on the card, a full
+                                  ///< 129,016-token context ended with 2613 MiB free against 990, at the same read
+                                  ///< speed (270.0 against 269.8 tok/s at that depth).  At load, the desktop
+                                  ///< holding 1890 MiB: 4046 experts (7.2 GiB) from the runtime against 3026
+                                  ///< (5.4 GiB) from the card, the difference being VRAM the desktop had
+                                  ///< (.pi/plans/poly-hip/m25-128k.txt, m27-128k.txt).
     std::string profile;          ///< expert use counts; orders the expert cache, and save_profile() adds to it
     bool gpu_experts = true;
     bool dump = false;            ///< print a checksum of every stage, for comparing against llama.cpp
@@ -264,6 +275,11 @@ public:
     /// first card's reserve and the least that one of them has free.
     int reserve_mib() const { return reserve_mib_; }
     int64_t vram_free_mib() const;
+    int64_t card_free_mib() const; ///< the card's own free VRAM, every client counted; -1 when it cannot be read
+    /// True when the sizing and monitoring figures come from the card itself (Options::vram_free_from): the card's
+    /// own free VRAM, where hipMemGetInfo counts this process alone on this stack.  Inert on CUDA, where
+    /// card_free_mib() is -1 and cudaMemGetInfo already reports what the driver holds for this device.
+    bool free_from_card() const { return opt_.vram_free_from == 1; }
     /// The expert cache sized again, to leave `mib` of VRAM free (below 0: what load() left), and filled with the
     /// experts used most so far.  Without VMM it gets no larger than load() made it.  Between calls that feed
     /// tokens: the experts it gives up are computed on the CPU from then on, as any expert outside it.
@@ -533,6 +549,7 @@ protected:
     int64_t kv_rows_ = 0;        ///< the rows they have VRAM for
     size_t budget_ = 0;          ///< their VRAM and the expert cache's together, as the cache was filled
     int asked_reserve_mib_ = -1; ///< Options::vram_reserve_mib as load() got it
+    mutable std::string card_vram_;  ///< sysfs device dir of this card, for card_free_mib()
     int reserve_mib_ = 0;        ///< what the cache was sized to leave free
     bool ram_tight_ = false;     ///< the machine's RAM is within 4 GiB of the model's files (fill_expert_cache())
     int minds_ = 0;              ///< mind_vram()'s calls
