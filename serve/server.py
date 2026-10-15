@@ -144,7 +144,16 @@ VISION_START = "<|vision_start|>"
 # turn: strata-poly keeps a checkpoint there (turn_at), which the chat's next request goes on from.  The second one
 # ends the first turn: the system prompt with the tools, which "warm_start" keeps.
 TURN_OPENERS = {"function": ("<|im_start|>",), "gemma": ("<|turn>",),
-                "glm": ("<|system|>", "<|user|>", "<|assistant|>", "<|observation|>")}
+                "glm": ("<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"),
+                "lfm2": ("<|im_start|>",)}
+
+
+def call_format_of(pre: str) -> str:
+    """The tool-call notation a tokenizer's `pre` name implies, read by serve/frontend.py's OutputParser and by
+    the template's capability probe: GLM's <arg_key>, Gemma 4's call:NAME{...}, LFM2's [NAME(a=1)], else the ChatML
+    <function=...> form."""
+    return "glm" if pre in ("glm4", "glm5") else "gemma" if pre == "gemma4" else "lfm2" if pre == "lfm2" \
+        else "function"
 WARM_MIN_TOKENS = 2048           # a shorter prompt start is quick to read again: not kept
 # #606: a reply that repeats one token this many times in a row is ended there ("length"): a model in a loop, or a
 # broken state that answers one token forever (an issue saw 36,689 tokens of "!"). The config's "repeat_stop_tokens"
@@ -2852,7 +2861,7 @@ class Service:
             if key in special}
         # how the model writes a tool call (serve/frontend.py's OutputParser)
         pre = getattr(tokenizer, "pre", "")
-        self.call_format = "glm" if pre in ("glm4", "glm5") else "gemma" if pre == "gemma4" else "function"
+        self.call_format = call_format_of(pre)
         self.turn_ids = frozenset(t[0] for t in (tokenizer.encode(s, parse_special=True)
                                                  for s in TURN_OPENERS[self.call_format]) if len(t) == 1)
         self.engine.turn_ids = self.turn_ids            # the GEN line's turn_at (StrataEngine.turn_key)
@@ -2867,6 +2876,11 @@ class Service:
             turn_end = tokenizer.encode("<turn|>", parse_special=True)
             self.stop_ids |= set(turn_end if len(turn_end) == 1 else [])
             self.think_open_ids = tokenizer.encode("<|channel>thought\n", parse_special=True)
+        elif self.call_format == "lfm2":
+            # its template's generation prompt ends on <|im_start|>assistant\n<think>, so the reply starts inside
+            # the reasoning and the parser must too; the model's own </think> ends it (run() looks for that at the
+            # prompt's end, like Qwen's and GLM's)
+            self.think_open_ids = tokenizer.encode("<think>", parse_special=True)
         # an image in a prompt (prepare()): the token the template writes for it, which stands for each of its rows;
         # the token the template writes before that one, if it writes one; the tokens to put around the rows, if
         # the template leaves that to the program
@@ -2969,7 +2983,8 @@ class Service:
         if tok is None:
             raise ValueError(f"{target['id']} cannot be loaded: its tokenizer is missing ({tpath})")
         tpl = tpath / "chat_template.jinja"
-        template = ChatTemplate(tpl if tpl.exists() else ROOT / "serve/chat_template.jinja")
+        template = ChatTemplate(tpl if tpl.exists() else ROOT / "serve/chat_template.jinja",
+                                format=call_format_of(getattr(tok, "pre", "")))
         if not self.fifo.acquire(timeout=self.switch_wait_s):
             raise ModelBusy("a request is still running; switch when it has finished")
         try:
@@ -3572,7 +3587,7 @@ class Service:
         off = kwargs.get("enable_thinking") is False
         # said either way: Gemma's template thinks only when told to, the others unless told not to
         kwargs = {**self.template_tokens, **kwargs, "enable_thinking": not off}
-        if self.call_format == "gemma" and tools:      # its template reads a tool as OpenAI sends it
+        if self.call_format in ("gemma", "lfm2") and tools:   # their templates read a tool as OpenAI sends it
             tools = [{"type": "function", "function": t} for t in tools]
         if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
             prompt = self.template.render(messages, tools=tools, **kwargs)
@@ -6472,7 +6487,8 @@ def main() -> int:
             "Thinking about it.</think>\n\nHello from the mock engine."]), None, {}
     # the model's own chat template (exported with its tokenizer), else the original model's
     tpl = tpath / "chat_template.jinja"
-    svc = Service(engine, tok, ChatTemplate(tpl if tpl.exists() else ROOT / "serve/chat_template.jinja"),
+    svc = Service(engine, tok, ChatTemplate(tpl if tpl.exists() else ROOT / "serve/chat_template.jinja",
+                                            format=call_format_of(getattr(tok, "pre", ""))),
                   model_name=cfg.get("model_name", "qwen3.8-flash-next"), vision=vision,
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)

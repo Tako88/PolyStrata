@@ -76,6 +76,13 @@ GLM4_PATTERN = (
     r"|\s+"
 )
 
+# The `lfm2` pre-tokenizer (LFM2.5-24B-A2B), from llama.cpp's LLAMA_VOCAB_PRE_TYPE_LLAMA3.  It is BYTE-IDENTICAL to
+# the ChatGLM4 text above, so GLM4_PATTERN is reused deliberately rather than by accident: llama.cpp's LLaMA3 case
+# (src/llama-vocab.cpp:280-295) and its ChatGLM4 case are the same regex, and `pre == "lfm2"` selects LLaMA3
+# (src/llama-vocab.cpp:2149-2159), which also sets ignore_merges.  LFM2 keeps this name only because its tokenizer is
+# a LLaMA-3-shaped BPE.
+LLAMA3_PATTERN = GLM4_PATTERN
+
 # The `gemma4` tokenizer (Gemma 4), from llama.cpp's LLAMA_VOCAB_PRE_TYPE_GEMMA4: a BPE over UTF-8 characters, not
 # over GPT-2's byte alphabet.  A space is written with SentencePiece's visible space before anything else, the text
 # is cut only at runs of newlines, a run that is a token as a whole is that token, the merges run over the rest,
@@ -84,8 +91,8 @@ GEMMA4_PATTERN = r"[^\n]+|\n+"
 SPACE = "\u2581"
 
 PRE_PATTERNS = {"glm4": GLM4_PATTERN, "glm5": GLM4_PATTERN,   # every other name: QWEN35_PATTERN, as before
-                "gemma4": GEMMA4_PATTERN}
-IGNORE_MERGES = ("glm4", "glm5")
+                "gemma4": GEMMA4_PATTERN, "lfm2": LLAMA3_PATTERN}
+IGNORE_MERGES = ("glm4", "glm5", "lfm2")
 RAW = ("gemma4",)                      # vocabularies of UTF-8 pieces
 MODELS = {"gpt2": None, "gemma4": "gemma4"}   # tokenizer.ggml.model -> the pre-tokenizer it implies, if any
 
@@ -401,6 +408,7 @@ def extract(gguf_path, out_dir) -> dict:
         # declared `pre` type, and a C++ port that re-derived it would be free to get `\p{M}` wrong again.
         "pre_pattern": tk.pre_pattern,
         "pre_pattern_source": "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_GEMMA4)" if tk.raw
+                              else "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_LLAMA3)" if tk.pre == "lfm2"
                               else "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_CHATGLM4)" if tk.ignore_merges
                               else ".ref/llama.cpp src/llama-vocab.cpp L396 (LLAMA_VOCAB_PRE_TYPE_QWEN35)",
         "ignore_merges": tk.ignore_merges,

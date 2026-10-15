@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import jinja2
+import jinja2.ext
+from jinja2 import nodes
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 LOGGER = logging.getLogger(__name__)
@@ -37,21 +39,37 @@ class TemplateRequestError(jinja2.exceptions.TemplateError, ValueError):
     client gets a 400 with the template's message instead of a dropped connection (#365)."""
 
 
-class ChatTemplate:
-    """The model's chat template, rendered with the same Jinja settings as transformers' apply_chat_template."""
+class _GenerationTags(jinja2.ext.Extension):
+    """Transformers' `{% generation %}` / `{% endgeneration %}` markers, which tag the assistant span for
+    return_assistant_tokens_mask.  They emit nothing.  llama.cpp's minja ignores them the same way
+    (common/jinja/parser.cpp:207-209), and a model whose GGUF template uses them (LFM2.5) has to render."""
+    tags = {"generation", "endgeneration"}
 
-    def __init__(self, path: str | Path):
+    def parse(self, parser):
+        next(parser.stream)                 # the tag's name; subparse() consumes the block's `%}`
+        return nodes.Output([])             # nothing at all: transformers' marker emits no text
+
+
+class ChatTemplate:
+    """The model's chat template, rendered with the same Jinja settings as transformers' apply_chat_template.
+
+    `format` is the tool-call format the tokenizer's `pre` implies (serve/server.py's call_format_of): it makes the
+    capability probe read the same call notation OutputParser does.  The `function` behaviour is unchanged."""
+
+    def __init__(self, path: str | Path, format: str = "function"):
         def raise_exception(message):
             raise TemplateRequestError(message)
 
         def tojson(x, ensure_ascii=False, indent=None, separators=None, sort_keys=False):
             return json.dumps(x, ensure_ascii=ensure_ascii, indent=indent, separators=separators, sort_keys=sort_keys)
 
-        env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"])
+        env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True,
+                                            extensions=["jinja2.ext.loopcontrols", _GenerationTags])
         env.filters["tojson"] = tojson
         env.globals["raise_exception"] = raise_exception
         self.source = Path(path).read_text(encoding="utf-8")
         self.template = env.from_string(self.source)
+        self.format = format
         self.caps = self._detect_caps()
 
     def render(self, messages: list[dict], tools: list[dict] | None = None, add_generation_prompt: bool = True,
@@ -92,20 +110,29 @@ class ChatTemplate:
             messages += [{"role": "tool", "content": reply} for reply in replies] + [user]
             prompt = render(messages, tools)
             # Instructions include example XML and literal tag names, which are not model output. Parse only
-            # complete calls to our probe functions, using the same body parser as OutputParser.
-            bodies = re.findall(r"<tool_call>\s*(<function=strata_caps_call_\d+>.*?</function>)\s*</tool_call>",
-                                prompt, re.S)
-            try:
-                parsed = [parse_tool_call(body) for body in bodies]
-            except ValueError:
-                return False
+            # complete calls to our probe functions, using the same body parser as OutputParser.  LFM2 writes
+            # [NAME(a=1), ...] between its own two markers, so its probe reads that form.
+            if self.format == "lfm2":
+                bodies = re.findall(r"<\|tool_call_start\|>\s*(\[.*?\])\s*<\|tool_call_end\|>", prompt, re.S)
+                try:
+                    parsed = [call for body in bodies for call in parse_lfm2_tool_calls(body)]
+                except ValueError:
+                    return False
+            else:
+                bodies = re.findall(r"<tool_call>\s*(<function=strata_caps_call_\d+>.*?</function>)\s*</tool_call>",
+                                    prompt, re.S)
+                try:
+                    parsed = [parse_tool_call(body) for body in bodies]
+                except ValueError:
+                    return False
             return [{"name": call.name, "arguments": call.arguments} for call in parsed] == calls \
                 and all(reply in prompt for reply in replies)
 
         history = [user, {"role": "assistant", "content": "strata_caps_answer",
                           "reasoning_content": "strata_caps_reasoning"}, user]
-        return {"supports_tools": all(s in tool_prompt for s in
-                                      ("strata_caps_call_0", "strata_caps_description", "<tool_call>", "<function=")),
+        wanted = ("strata_caps_call_0", "strata_caps_description") if self.format == "lfm2" else \
+            ("strata_caps_call_0", "strata_caps_description", "<tool_call>", "<function=")
+        return {"supports_tools": all(s in tool_prompt for s in wanted),
                 "supports_tool_calls": calls_supported(1),
                 "supports_system_role": "strata_caps_system" in render(
                     [{"role": "system", "content": "strata_caps_system"}, user]),
@@ -926,6 +953,194 @@ def gemma_model_turn(prompt: str, thinking: bool) -> str:
     return prompt
 
 
+# LFM2 / LFM2.5 writes a call as <|tool_call_start|>[NAME(kwarg=value), NAME2(kwarg=value)]<|tool_call_end|>,
+# Python-style: keyword arguments, single- or double-quoted strings with escapes, Python's True/False/None and JSON's
+# true/false/null both accepted, dotted names allowed, and parallel calls comma-separated in the same block.
+# llama.cpp's common/chat.cpp:1903-1905 comment says "(except dotted names and JSON literals true/false/null)",
+# which is stale: its own tests (tests/test-chat.cpp:1979-2075) and python_style_tool_calls(...,
+# allow_json_literals=true) accept both.
+LFM2_CALL, LFM2_CALL_END = "<|tool_call_start|>", "<|tool_call_end|>"
+
+
+def lfm2_call_name(text: str) -> str | None:
+    """A LFM2 block's first call name, or None while it is still arriving: the text after the block's `[` up to its
+    `(`.  The name may be dotted (Calendar.create_event)."""
+    at = text.find("[")
+    if at < 0:
+        return None
+    rest = text[at + 1:].lstrip()
+    paren = rest.find("(")
+    if paren < 0:
+        return None
+    return rest[:paren].strip() or None
+
+
+def lfm2_call_end(text: str) -> int:
+    """Where an LFM2 block ends: the first <|tool_call_end|> outside a string (a value may quote the marker).  -1:
+    not complete yet."""
+    quote, i = "", 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in ("'", '"'):
+            quote = ch
+        elif text.startswith(LFM2_CALL_END, i):
+            return i
+        i += 1
+    return -1
+
+
+def _lfm2_unescape(raw: str) -> str:
+    """A quoted value's escapes when it was never closed (the output stopped in the middle of it): the common
+    Python ones decode, anything else is left as written."""
+    out, i = [], 0
+    simple = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", "'": "'", '"': '"', "0": "\0"}
+    while i < len(raw):
+        ch = raw[i]
+        if ch == "\\" and i + 1 < len(raw):
+            nxt = raw[i + 1]
+            out.append(simple.get(nxt, "\\" + nxt))
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _lfm2_value(s: str, i: int):
+    """The value starting at s[i] -> (value, the index after it): LFM2's Python-ish leaves - quoted strings (their
+    escapes decoded), numbers, True/False/None, true/false/null, {dict} and [list].  Text that ends early (a call
+    the output stopped in) gives what was there."""
+    while i < len(s) and s[i].isspace():
+        i += 1
+    if i < len(s) and s[i] in ("'", '"'):
+        quote, j, seen = s[i], i + 1, []
+        while j < len(s):
+            ch = s[j]
+            if ch == "\\" and j + 1 < len(s):
+                seen.append(ch)
+                seen.append(s[j + 1])
+                j += 2
+                continue
+            if ch == quote:
+                break
+            seen.append(ch)
+            j += 1
+        if j < len(s):
+            token = quote + "".join(seen) + quote
+            try:
+                import ast
+                return ast.literal_eval(token), j + 1
+            except (ValueError, SyntaxError):
+                pass
+        return _lfm2_unescape("".join(seen)), len(s)
+    if i < len(s) and s[i] == "{":
+        out, i = {}, i + 1
+        while True:
+            while i < len(s) and (s[i].isspace() or s[i] == ","):
+                i += 1
+            if i >= len(s) or s[i] == "}":
+                return out, i + 1
+            if s[i] in ("'", '"'):
+                key, i = _lfm2_value(s, i)
+            else:
+                end = i
+                while end < len(s) and s[end] not in ":,}":
+                    end += 1
+                key, i = s[i:end].strip(), end
+            while i < len(s) and s[i] != ":":
+                i += 1
+            value, i = _lfm2_value(s, i + 1)
+            out[key] = value
+    if i < len(s) and s[i] == "[":
+        out, i = [], i + 1
+        while True:
+            while i < len(s) and (s[i].isspace() or s[i] == ","):
+                i += 1
+            if i >= len(s) or s[i] == "]":
+                return out, i + 1
+            value, i = _lfm2_value(s, i)
+            out.append(value)
+    end = i
+    while end < len(s) and s[end] not in ",)]}":
+        end += 1
+    word = s[i:end].strip()
+    if word in ("True", "true"):
+        return True, end
+    if word in ("False", "false"):
+        return False, end
+    if word in ("None", "null"):
+        return None, end
+    try:
+        return json.loads(word), end
+    except ValueError:
+        return word, end
+
+
+def _lfm2_split(s: str) -> list[str]:
+    """Split at top-level commas, keeping quoted strings and nested ({[ ]}) groups whole."""
+    out, depth, quote, start, i = [], 0, "", 0, 0
+    while i < len(s):
+        ch = s[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            out.append(s[start:i])
+            start = i + 1
+        i += 1
+    out.append(s[start:])
+    return [part.strip() for part in out if part.strip()]
+
+
+def parse_lfm2_tool_calls(body: str, schema: dict | None = None) -> list[ToolCall]:
+    """`[NAME(a=1), NAME2(b='x')]` -> a list of ToolCall, one per comma-separated call (LFM2 writes parallel calls
+    in one block).  Values are Python-ish literals; a parameter the tool's schema declares a string is kept as text
+    when it was written bare, the parse_gemma_tool_call idiom.  `schema`: the map of every declared tool
+    (name -> tool definition), or one tool definition (for a caller that already resolved the block's first name)."""
+    if isinstance(schema, dict) and "name" in schema:
+        schema = {schema["name"]: schema}
+    tools = schema or {}
+    s = body.strip()
+    if s.startswith("["):
+        s = s[1:]
+    if s.endswith("]"):
+        s = s[:-1]
+    out = []
+    for part in _lfm2_split(s):
+        name, paren, rest = part.partition("(")
+        if not paren or not name.strip():
+            raise ValueError("malformed LFM2 tool call: " + part[:80])
+        if rest.endswith(")"):
+            rest = rest[:-1]
+        props = ((tools.get(name.strip()) or {}).get("parameters") or {}).get("properties") or {}
+        args = {}
+        for arg in _lfm2_split(rest):
+            key, eq, value = arg.partition("=")
+            if not eq:
+                continue
+            key = key.strip()
+            args[key] = _lfm2_value(value, 0)[0]
+            if (props.get(key) or {}).get("type") == "string" and not isinstance(args[key], str):
+                args[key] = json.dumps(args[key], ensure_ascii=False)
+        out.append(ToolCall(name=name.strip(), arguments=args))
+    return out
+
+
 RCALL_MAX = 32768        # the most of a `<tool_call>` inside the reasoning that is held while waiting for its end (#804)
 
 
@@ -940,16 +1155,21 @@ class OutputParser:
         # What tells a <function=...> call from a quoted one, or recovers one written beside the template's form
         # (a call inside the reasoning, `recover`), reads that form only and is not applied to these.
         self.whole = {"glm": (glm_call_name, glm_call_end, parse_glm_tool_call),
-                      "gemma": (gemma_call_name, gemma_call_end, parse_gemma_tool_call)}.get(call_format)
+                      "gemma": (gemma_call_name, gemma_call_end, parse_gemma_tool_call),
+                      "lfm2": (lfm2_call_name, lfm2_call_end, parse_lfm2_tool_calls)}.get(call_format)
+        self.call_format = call_format
         self.call_start, self.call_stop = (GEMMA_CALL, GEMMA_CALL_END) if call_format == "gemma" \
-            else (CALL_START, CALL_END)
-        # Gemma opens its reasoning itself, as a channel, and ends it with a token of its own; the others' reasoning
-        # is opened by the prompt and ends with </think>.  `opened`: this prompt ended on Gemma's opening (its
-        # template writes it after a tool's answer), so the reply starts inside the reasoning
+            else (LFM2_CALL, LFM2_CALL_END) if call_format == "lfm2" else (CALL_START, CALL_END)
+        # Gemma opens its reasoning itself, as a channel, and ends it with a token of its own; LFM2's template writes
+        # a `<think>` the model continues from, and the model can also write its own; the others' reasoning is opened
+        # by the prompt and ends with </think>.  `opened`: this prompt ended on the opener (LFM2's and Gemma's after a
+        # tool's answer), so the reply starts inside the reasoning
         self.think_open, self.think_end = ("<|channel>thought\n", "<channel|>") if call_format == "gemma" \
-            else ("", THINK_END)
-        # #537 tells a quoted </think> by the line break the end has after it.  GLM's and Gemma's answers follow
-        # their end tag at once ('say "Paris."</think>Paris'), so there every end tag ends the reasoning
+            else ("<think>", THINK_END) if call_format == "lfm2" else ("", THINK_END)
+        # #537 tells a quoted </think> by the line break the end has after it.  GLM's, Gemma's and LFM2's answers
+        # follow their end tag at once ('say "Paris."</think>Paris'), so there every end tag ends the reasoning:
+        # a real LFM2.5 reply is `...We'll output "Paris".</think>Paris<|im_end|>` (measured, Step 22), and the
+        # quoted-tag probe would otherwise swallow a real end after a closing quote.
         self.quotes_end = call_format == "function"
         # the reply may still start with think_open.  Asked not to think, Gemma can still open with a thought
         # (an empty one, after a tool's answer): it is read either way
@@ -1433,11 +1653,30 @@ class OutputParser:
                     return out
                 body = self.buf[:i]
                 self.buf = self.buf[i + len(self.call_stop):]
-                call = parse(body, self.schemas.get(name_of(body + self.call_stop)))
+                # LFM2's block may hold several parallel calls, each with its own tool: it parses against the whole
+                # map.  GLM's and Gemma's wrapper holds one call, whose own tool the name resolves.
+                schema = self.schemas if self.call_format == "lfm2" else self.schemas.get(name_of(body + self.call_stop))
+                try:
+                    got = parse(body, schema)
+                except ValueError:
+                    # a complete but malformed block (a LFM2 body with no "(") is text, never an error that ends
+                    # the request; finish() surfaces an unterminated block the same way.
+                    out.append(Event("content", self._track(self.call_start + body + self.call_stop)))
+                    self._reset_scan()
+                    self.state, self.lead = "content", False
+                    continue
+                calls = got if isinstance(got, list) else [got]
+                if not calls:
+                    # an empty block (`<|tool_call_start|>[]<|tool_call_end|>`) consumes its markers without a call:
+                    # surface them as text instead of letting the block silently disappear
+                    out.append(Event("content", self._track(self.call_start + body + self.call_stop)))
+                    self._reset_scan()
+                    self.state, self.lead = "content", False
+                    continue
                 if self.scall is not None:
-                    call.id = self.scall.id
-                    out.append(Event("tool_args", json.dumps(call.arguments, ensure_ascii=False), call=self.scall))
-                out.append(Event("tool_call", call=call))
+                    calls[0].id = self.scall.id
+                    out.append(Event("tool_args", json.dumps(calls[0].arguments, ensure_ascii=False), call=self.scall))
+                out += [Event("tool_call", call=call) for call in calls]
                 self._reset_scan()
                 self.state, self.lead = "content", True
             else:
