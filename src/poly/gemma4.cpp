@@ -44,7 +44,7 @@ void Gemma4::load_geometry() {
         need(v != nullptr, key);
         return *v;
     };
-    gelu_ = true;
+    act_ = 1;
     window_ = shape_i("attention.sliding_window");
     dim_full_ = shape_i("attention.key_length");
     dim_swa_ = shape_i("attention.key_length_swa");

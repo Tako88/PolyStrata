@@ -163,7 +163,7 @@ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::str
 }
 
 void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int d_type, int n_embd,
-                 int n_ff, const float* x, float limit, bool gelu, float* out,
+                 int n_ff, const float* x, float limit, int act, float* out,
                  const std::function<void()>* meanwhile) {
     init_once();
     const ggml_type_traits_cpu* tg = traits(gu_type);
@@ -174,25 +174,27 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
     const size_t h_bytes = ggml_row_size(td->vec_dot_type, n_ff);
 
     // The workers get these through the pointers below: a thread_local named in their code would be their own.
-    static thread_local std::vector<uint8_t> act, hq;
+    static thread_local std::vector<uint8_t> actq, hq;
     static thread_local std::vector<float> h;
     static thread_local std::vector<int> by, run;
-    act.resize((size_t) rows * a_bytes);
+    actq.resize((size_t) rows * a_bytes);
     hq.resize((size_t) n * h_bytes);
     h.resize((size_t) n * n_ff);
     // ggml's quantizers for the activations are scalar: microseconds a row, which on one thread kept the others
     // waiting, here and before the down products
-    uint8_t* actp = act.data();
+    uint8_t* actp = actq.data();
     const auto act_from = traits(tg->vec_dot_type)->from_float;
     workers.run(rows, [&](int t) { act_from(x + (size_t) t * n_embd, actp + (size_t) t * a_bytes, n_embd); });
 
-    // The uses of one expert next to each other (by), and where each expert's run of them starts (run).
+    // The uses of one expert next to each other (by), and where each expert's run of them starts (run).  An
+    // ungated expert (act 2) has no gate; its up matrix is what identifies it.
+    const auto key_of = [&](int i) { return act == 2 ? experts[i].up : experts[i].gate; };
     by.resize((size_t) n);
     std::iota(by.begin(), by.end(), 0);
-    std::stable_sort(by.begin(), by.end(), [&](int a, int b) { return experts[a].gate < experts[b].gate; });
+    std::stable_sort(by.begin(), by.end(), [&](int a, int b) { return key_of(a) < key_of(b); });
     run.clear();
     for (int i = 0; i < n; ++i)
-        if (i == 0 || experts[by[(size_t) i]].gate != experts[by[(size_t) i - 1]].gate) run.push_back(i);
+        if (i == 0 || key_of(by[(size_t) i]) != key_of(by[(size_t) i - 1])) run.push_back(i);
     const int n_run = (int) run.size();
     run.push_back(n);
 
@@ -208,15 +210,20 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
         const CpuExpert& e = experts[byp[i0]];
         const int r0 = (t % gu_tasks) * kRowsPerTask, r1 = std::min(n_ff, r0 + kRowsPerTask);
         for (int r = r0; r < r1; ++r) {
-            const uint8_t* gate = e.gate + (size_t) r * gu_row;
             const uint8_t* up = e.up + (size_t) r * gu_row;
+            const uint8_t* gate = e.gate ? e.gate + (size_t) r * gu_row : nullptr;
             for (int i = i0; i < i1; ++i) {
                 const int j = byp[i];
                 const uint8_t* a = actp + (size_t) experts[j].row * a_bytes;
-                float g = 0.f, u = 0.f;
-                tg->vec_dot(n_embd, &g, 0, gate, 0, a, 0, 1);
+                float u = 0.f;
                 tg->vec_dot(n_embd, &u, 0, up, 0, a, 0, 1);
-                if (gelu) {
+                if (act == 2) {
+                    hp[(size_t) j * n_ff + r] = u > 0.f ? u * u : 0.f;
+                    continue;
+                }
+                float g = 0.f;
+                tg->vec_dot(n_embd, &g, 0, gate, 0, a, 0, 1);
+                if (act == 1) {
                     hp[(size_t) j * n_ff + r] =
                         0.5f * g * (1.f + std::tanh(0.7978845608f * g * (1.f + 0.044715f * g * g))) * u;
                     continue;

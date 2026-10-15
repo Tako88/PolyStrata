@@ -283,6 +283,11 @@ private:
 
 enum class MetaType : uint32_t { U8 = 0, I8, U16, I16, U32, I32, F32, BOOL, STRING, ARRAY, U64, I64, F64 };
 
+// A numeric metadata array at most this long is kept whole (read_value below).  head_count_kv, expert_used_count,
+// expert_feed_forward_length and feed_forward_length are one value a layer; the old 64-value sample would hide
+// the layers past it.  A string array is always sampled: a 131,072-token vocabulary must stay cheap.
+inline constexpr uint64_t kMetaArraySample = 4096;
+
 struct MetaValue {
     MetaType type = MetaType::U32;
     uint64_t u = 0;                // integer payloads
@@ -343,10 +348,13 @@ inline MetaValue read_value(Cursor& c, MetaType t, int depth = 0) {
         v.elem = (MetaType)c.read<uint32_t>();
         v.count = c.read<uint64_t>();
         if (v.count > (1u << 24)) throw std::runtime_error("GGUF: implausible array length");
-        v.items.reserve((size_t)std::min<uint64_t>(v.count, 64));
+        // A small numeric array is kept whole: it is read layer by layer (meta_layer_value), so a 64-value
+        // sample would hide every layer past 64.  A long numeric array and any string array keep the sample.
+        const bool whole = v.elem != MetaType::STRING && v.elem != MetaType::ARRAY && v.count <= kMetaArraySample;
+        v.items.reserve((size_t)std::min<uint64_t>(v.count, whole ? v.count : 64));
         for (uint64_t i = 0; i < v.count; ++i) {
             MetaValue e = read_value(c, v.elem, depth + 1);
-            if (i < 64) v.items.push_back(std::move(e)); // keep a sample; the count is what matters
+            if (whole || i < 64) v.items.push_back(std::move(e)); // keep a sample; the count is what matters
         }
         break;
     }
@@ -354,6 +362,16 @@ inline MetaValue read_value(Cursor& c, MetaType t, int depth = 0) {
         throw std::runtime_error("GGUF: unknown metadata value type");
     }
     return v;
+}
+
+// A per-layer number of the metadata: a scalar is the same for every layer, an array is its `il`th item.  The
+// caller names the key in the error; `layers` is the model's layer count, so a short array is refused by name.
+inline int64_t meta_layer_value(const MetaValue& v, int il, int layers) {
+    if (v.type != MetaType::ARRAY) return (int64_t) v.u;
+    if (il < 0 || (size_t) il >= v.items.size())
+        throw std::runtime_error("GGUF: a per-layer array has " + std::to_string(v.items.size()) + " values for " +
+                                 std::to_string(layers) + " layers");
+    return (int64_t) v.items[(size_t) il].u;
 }
 
 class GgufFile {

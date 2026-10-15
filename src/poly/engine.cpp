@@ -613,7 +613,7 @@ void Engine::shrink_cache(size_t bytes) {
     for (int il = 0; il < (int) layers_.size(); ++il) {
         const Layer& L = layers_[(size_t) il];
         if (L.trade < 0) continue;
-        for (int e = 0; e < n_expert_; ++e) {
+        for (int e = 0; e < L.n_expert; ++e) {
             const uint8_t* s = L.slot[(size_t) e];
             if (!s) continue;
             if ((size_t) (s - exp_) + L.slot_bytes > end) past.push_back(held(il, e));
@@ -691,6 +691,30 @@ float Engine::shape_f(const char* key) const {
     return (float) v->f;
 }
 
+// A number of the model's shape that a file may give per layer as an array: the largest of the array, which is
+// what the model-wide scalars are (expert_used_count, expert_feed_forward_length); a scalar is itself.  `what`
+// names the key in the error, as shape_i() does.
+int Engine::shape_i_or_max(const char* key, const char* what) const {
+    const MetaValue* v = meta_in(*gg_, key);
+    if (!v) throw std::runtime_error("the GGUF has no " + gg_->get("general.architecture")->s + "." + what);
+    if (v->type != MetaType::ARRAY) return (int) v->u;
+    int mx = 0;
+    for (const MetaValue& e : v->items) mx = std::max(mx, (int) e.u);
+    return mx;
+}
+
+// A per-layer number: a scalar is the same for every layer, an array is its `il`th item, refused by name when
+// the array has no such layer.
+int Engine::shape_layer(const char* key, int il) const {
+    const MetaValue* v = meta_in(*gg_, key);
+    if (!v) throw std::runtime_error("the GGUF has no " + gg_->get("general.architecture")->s + "." + key);
+    if (v->type == MetaType::ARRAY && (il < 0 || (size_t) il >= v->items.size()))
+        throw std::runtime_error("the GGUF's " + gg_->get("general.architecture")->s + "." + key + " has " +
+                                 std::to_string(v->items.size()) + " values for " + std::to_string(n_layer_) +
+                                 " layers, none for layer " + std::to_string(il));
+    return (int) meta_layer_value(*v, il, n_layer_);
+}
+
 // What every architecture's file says of the model: its layers, its width, its vocabulary and its experts.
 //
 // The block that guesses a second token after the model's own is one more block after the model's.  It is the
@@ -718,8 +742,10 @@ void Engine::load_shape() {
     n_vocab_ = vocab ? (int) vocab->u : te && te->shape.size() == 2 ? (int) te->shape[1] : 0;
     rms_eps_ = shape_f("attention.layer_norm_rms_epsilon");
     n_expert_ = shape_i("expert_count");
-    n_used_ = shape_i("expert_used_count");
-    n_ff_exp_ = shape_i("expert_feed_forward_length");
+    // A file may give these one value a layer; the model-wide scalars are the largest of them, and a scalar file
+    // takes exactly the path it did before.
+    n_used_ = shape_i_or_max("expert_used_count", "expert_used_count");
+    n_ff_exp_ = shape_i_or_max("expert_feed_forward_length", "expert_feed_forward_length");
     const MetaValue* shexp = meta_in(*gg_, "expert_shared_feed_forward_length");
     n_ff_shexp_ = shexp ? (int) shexp->u : n_ff_exp_;
 
@@ -747,7 +773,18 @@ void Engine::load_moe(int il, bool shared) {
     Layer& L = layers_[(size_t) il];
     auto mat = [&](const char* n, int64_t a, int64_t b) { return upload(tensor(il, n), blk(il, n), a, b, kAnyMat); };
     L.moe = true;
-    L.gate_inp = mat("ffn_gate_inp.weight", n_embd_, n_expert_);
+    // The per-layer truth when the architecture set it, else the model-wide scalars, written back into the layer.
+    L.n_expert = L.n_expert ? L.n_expert : n_expert_;
+    L.n_used = L.n_used ? L.n_used : n_used_;
+    L.n_ff_exp = L.n_ff_exp ? L.n_ff_exp : n_ff_exp_;
+    // 0 doubles as "unset" and "explicit SiLU": a layer's own activation wins, and the engine's default fills the
+    // rest.  (A layer that wanted SiLU on a GELU-default engine would need a distinct "unset" value.)
+    if (!L.act) L.act = act_;
+    check_moe_activation(L.gu_planes, L.act, blk(il, "ffn_*_exps.weight: "));
+    // The experts' own input width: the model's embedding, or a latent MoE's narrower one (moe_in_w_/moe_out_w_).
+    const int64_t expert_in = moe_in_w_ ? moe_in_w_ : n_embd_;
+    const int64_t expert_out = moe_out_w_ ? moe_out_w_ : n_embd_;
+    L.gate_inp = mat("ffn_gate_inp.weight", n_embd_, L.n_expert);
     if (shared) {
         L.sh_gate = mat("ffn_gate_shexp.weight", n_embd_, n_ff_shexp_);
         L.sh_up = mat("ffn_up_shexp.weight", n_embd_, n_ff_shexp_);
@@ -758,40 +795,49 @@ void Engine::load_moe(int il, bool shared) {
         const TensorInfo* t = tensor(il, n);
         if (!t) throw std::runtime_error("the GGUF has no tensor " + blk(il, n));
         if (t->shape.size() != 3 || (int64_t) t->shape[0] != n_in || (int64_t) t->shape[1] != rows ||
-            (int64_t) t->shape[2] != n_expert_)
+            (int64_t) t->shape[2] != L.n_expert)
             throw std::runtime_error(t->name + " is " + shape_of(*t) + ", expected [" + std::to_string(n_in) + ", " +
-                                     std::to_string(rows) + ", " + std::to_string(n_expert_) + "]");
+                                     std::to_string(rows) + ", " + std::to_string(L.n_expert) + "]");
         return *t;
     };
-    const TensorInfo& td = exps("ffn_down_exps.weight", n_ff_exp_, n_embd_);
+    const TensorInfo& td = exps("ffn_down_exps.weight", L.n_ff_exp, expert_out);
     L.d_type = td.type;
-    L.d_bytes = home(td).payload(td) / (size_t) n_expert_;
+    L.d_bytes = home(td).payload(td) / (size_t) L.n_expert;
     L.exp_down = home(td).data(td);
     if (L.d_type == GGML_TYPE_MXFP4) mxfp4_to_q5_0(il);
-    if (tensor(il, "ffn_gate_up_exps.weight")) {
-        const TensorInfo& gu = exps("ffn_gate_up_exps.weight", n_embd_, 2 * n_ff_exp_);
+    if (L.gu_planes == 1) {
+        // ungated: an up alone, no gate to multiply by
+        const TensorInfo& tu = exps("ffn_up_exps.weight", expert_in, L.n_ff_exp);
+        L.gu_type = tu.type;
+        L.gu_stride = L.gu_bytes = home(tu).payload(tu) / (size_t) L.n_expert;
+        L.exp_gate = nullptr;
+        L.exp_up = home(tu).data(tu);
+    } else if (tensor(il, "ffn_gate_up_exps.weight")) {
+        const TensorInfo& gu = exps("ffn_gate_up_exps.weight", expert_in, 2 * L.n_ff_exp);
         L.gu_type = gu.type;
-        L.gu_stride = home(gu).payload(gu) / (size_t) n_expert_;
+        L.gu_stride = home(gu).payload(gu) / (size_t) L.n_expert;
         L.gu_bytes = L.gu_stride / 2;
         L.exp_gate = home(gu).data(gu);
         L.exp_up = L.exp_gate + L.gu_bytes;
     } else {
-        const TensorInfo& tg = exps("ffn_gate_exps.weight", n_embd_, n_ff_exp_);
-        const TensorInfo& tu = exps("ffn_up_exps.weight", n_embd_, n_ff_exp_);
+        const TensorInfo& tg = exps("ffn_gate_exps.weight", expert_in, L.n_ff_exp);
+        const TensorInfo& tu = exps("ffn_up_exps.weight", expert_in, L.n_ff_exp);
         if (tg.type != tu.type)
             throw std::runtime_error(tg.name + " and " + tu.name +
                                      " have different types, which this engine does not run");
         L.gu_type = tg.type;
-        L.gu_stride = L.gu_bytes = home(tg).payload(tg) / (size_t) n_expert_;
+        L.gu_stride = L.gu_bytes = home(tg).payload(tg) / (size_t) L.n_expert;
         home(tu).payload(tu);
         L.exp_gate = home(tg).data(tg);
         L.exp_up = home(tu).data(tu);
     }
     std::string err;
-    if (!cpu_expert_types_ok((int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, err))
+    if (!cpu_expert_types_ok((int) L.gu_type, (int) L.d_type, (int) expert_in, (int) L.n_ff_exp, err))
         throw std::runtime_error(blk(il, "ffn_*_exps.weight: ") + err);
-    L.slot.assign((size_t) n_expert_, nullptr);
+    L.slot.assign((size_t) L.n_expert, nullptr);
     ++n_moe_;
+    moe_experts_ += L.n_expert;
+    moe_ff_max_ = std::max(moe_ff_max_, (int) L.gu_planes * L.n_ff_exp);
 }
 
 // No kernel here multiplies MXFP4 on the card, by matvec or MMQ, so a layer whose down experts are MXFP4 ran them on
@@ -804,7 +850,7 @@ void Engine::load_moe(int il, bool shared) {
 void Engine::mxfp4_to_q5_0(int il) {
     Layer& L = layers_[(size_t) il];
     constexpr size_t kIn = 17, kOut = 22;   // block_mxfp4, block_q5_0
-    const size_t blocks = L.d_bytes * (size_t) n_expert_ / kIn;
+    const size_t blocks = L.d_bytes * (size_t) L.n_expert / kIn;
     std::unique_ptr<uint8_t[]> out;
     try {
         out.reset(new uint8_t[blocks * kOut]);
@@ -824,7 +870,7 @@ void Engine::mxfp4_to_q5_0(int il) {
     if (bad) return;
     L.exp_down = out.get();
     L.d_type = GGML_TYPE_Q5_0;
-    L.d_bytes = blocks / (size_t) n_expert_ * kOut;
+    L.d_bytes = blocks / (size_t) L.n_expert * kOut;
     converted_.push_back(std::move(out));
     std::fprintf(stderr, "strata-poly: layer %d's down experts converted from MXFP4 to Q5_0, %.2f GiB of RAM\n", il,
                  (double) (blocks * kOut) / (1 << 30));
@@ -1062,12 +1108,12 @@ void Engine::fill_expert_cache() {
         const size_t unit = std::lcm(std::lcm(ggml_type_size((ggml_type) L.gu_type),
                                               ggml_type_size((ggml_type) L.d_type)),
                                      size_t(8));
-        const size_t bytes = (2 * L.gu_bytes + L.d_bytes + kTail + unit - 1) / unit * unit;
+        const size_t bytes = (L.gu_planes * L.gu_bytes + L.d_bytes + kTail + unit - 1) / unit * unit;
         L.slot_bytes = bytes;
         if (std::find(sizes.begin(), sizes.end(), bytes) == sizes.end()) sizes.push_back(bytes);
         L.trade = (int) (std::find(sizes.begin(), sizes.end(), bytes) - sizes.begin());
         slot_max_ = std::max(slot_max_, bytes);
-        for (int e = 0; e < n_expert_; ++e) {
+        for (int e = 0; e < L.n_expert; ++e) {
             const size_t i = (size_t) il * n_expert_ + e;
             const double used = (double) ((prior_.empty() ? 0 : prior_[i]) + use_[i]);
             cands.push_back({il, e, bytes, used / (double) bytes});
@@ -1112,10 +1158,12 @@ void Engine::fill_expert_cache() {
         uint8_t* s = exp_ + exp_at_;
         exp_at_ += c.bytes;
         const size_t e = (size_t) c.e;
-        ck(cudaMemcpy(s, L.exp_gate + e * L.gu_stride, L.gu_bytes, cudaMemcpyHostToDevice), "expert upload");
-        ck(cudaMemcpy(s + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes, cudaMemcpyHostToDevice),
-           "expert upload");
-        ck(cudaMemcpy(s + 2 * L.gu_bytes, L.exp_down + e * L.d_bytes, L.d_bytes, cudaMemcpyHostToDevice),
+        const uint8_t* g = L.exp_gate ? L.exp_gate : L.exp_up;
+        ck(cudaMemcpy(s, g + e * L.gu_stride, L.gu_bytes, cudaMemcpyHostToDevice), "expert upload");
+        if (L.gu_planes == 2)
+            ck(cudaMemcpy(s + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes, cudaMemcpyHostToDevice),
+               "expert upload");
+        ck(cudaMemcpy(s + L.gu_planes * L.gu_bytes, L.exp_down + e * L.d_bytes, L.d_bytes, cudaMemcpyHostToDevice),
            "expert upload");
         L.slot[e] = s;
         ++cached_;
@@ -1241,7 +1289,7 @@ int Engine::grow_cache(size_t bytes) {
     for (int il = 0; il < (int) layers_.size(); ++il) {
         const Layer& L = layers_[(size_t) il];
         if (L.trade < 0) continue;
-        for (int e = 0; e < n_expert_; ++e) {
+        for (int e = 0; e < L.n_expert; ++e) {
             const size_t i = (size_t) il * n_expert_ + e;
             if (L.slot[(size_t) e] || (!coming_.empty() && coming_[i])) continue;
             const double used = (double) ((prior_.empty() ? 0 : prior_[i]) + use_[i]);
@@ -1272,10 +1320,12 @@ int Engine::grow_cache(size_t bytes) {
         uint8_t* s = exp_ + exp_at_;
         exp_at_ += L.slot_bytes;
         const size_t e = (size_t) c.e;
-        ck(cudaMemcpy(s, L.exp_gate + e * L.gu_stride, L.gu_bytes, cudaMemcpyHostToDevice), "expert upload");
-        ck(cudaMemcpy(s + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes, cudaMemcpyHostToDevice),
-           "expert upload");
-        ck(cudaMemcpy(s + 2 * L.gu_bytes, L.exp_down + e * L.d_bytes, L.d_bytes, cudaMemcpyHostToDevice),
+        const uint8_t* g = L.exp_gate ? L.exp_gate : L.exp_up;
+        ck(cudaMemcpy(s, g + e * L.gu_stride, L.gu_bytes, cudaMemcpyHostToDevice), "expert upload");
+        if (L.gu_planes == 2)
+            ck(cudaMemcpy(s + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes, cudaMemcpyHostToDevice),
+               "expert upload");
+        ck(cudaMemcpy(s + L.gu_planes * L.gu_bytes, L.exp_down + e * L.d_bytes, L.d_bytes, cudaMemcpyHostToDevice),
            "expert upload");
         L.slot[e] = s;
         ++cached_;
@@ -1289,13 +1339,13 @@ int Engine::grow_cache(size_t bytes) {
 // first, as many as the buffer holds.  Worked out when the layer runs: the cache changes (follow()).
 void Engine::plan_ahead(Layer& L, int il) {
     L.ahead.clear();
-    for (int e = 0; e < n_expert_; ++e)
+    for (int e = 0; e < L.n_expert; ++e)
         if (!L.slot[(size_t) e]) L.ahead.push_back(e);
     if (!prior_.empty()) {
         const int64_t* used = prior_.data() + (size_t) il * n_expert_;
         std::stable_sort(L.ahead.begin(), L.ahead.end(), [used](int32_t a, int32_t b) { return used[a] > used[b]; });
     }
-    L.ahead.resize(std::min(L.ahead.size(), stage_bytes_ / (2 * L.gu_bytes + L.d_bytes)));
+    L.ahead.resize(std::min(L.ahead.size(), stage_bytes_ / (L.gu_planes * L.gu_bytes + L.d_bytes)));
 }
 
 // The follower: an asked-for expert goes from the mapped file to its pinned buffer, and from there to its slot.
@@ -1314,10 +1364,12 @@ void Engine::follow_loop() {
         lk.unlock();
         const Layer& L = layers_[(size_t) s->il];
         const size_t e = (size_t) s->e, gu = L.gu_bytes;
-        std::memcpy(s->pinned, L.exp_gate + e * L.gu_stride, gu);
-        std::memcpy(s->pinned + gu, L.exp_up + e * L.gu_stride, gu);
-        std::memcpy(s->pinned + 2 * gu, L.exp_down + e * L.d_bytes, L.d_bytes);
-        cudaError_t err = cudaMemcpyAsync(s->slot, s->pinned, 2 * gu + L.d_bytes, cudaMemcpyHostToDevice, cs(swap_st_));
+        const uint8_t* g = L.exp_gate ? L.exp_gate : L.exp_up;
+        std::memcpy(s->pinned, g + e * L.gu_stride, gu);
+        if (L.gu_planes == 2) std::memcpy(s->pinned + gu, L.exp_up + e * L.gu_stride, gu);
+        std::memcpy(s->pinned + L.gu_planes * gu, L.exp_down + e * L.d_bytes, L.d_bytes);
+        cudaError_t err = cudaMemcpyAsync(s->slot, s->pinned, L.gu_planes * gu + L.d_bytes, cudaMemcpyHostToDevice,
+                                          cs(swap_st_));
         if (err == cudaSuccess) err = cudaEventRecord(s->done, cs(swap_st_));
         lk.lock();
         if (err != cudaSuccess) {
@@ -1385,7 +1437,7 @@ void Engine::follow(int written) {
         if (L.trade < 0) continue;
         Pick* in = in_.data() + (size_t) L.trade * most;
         Pick* out = out_.data() + (size_t) L.trade * most;
-        for (int e = 0; e < n_expert_; ++e) {
+        for (int e = 0; e < L.n_expert; ++e) {
             const size_t i = (size_t) il * ne + (size_t) e;
             const float r = recent_[i];
             const int64_t p = prior_.empty() ? 0 : prior_[i];
@@ -1496,6 +1548,8 @@ void Engine::load(const Options& o) {
         const int n_all = n_layer_ + (block_layer_ ? 1 : 0);
         layers_.assign((size_t) n_all, Layer{});
         n_moe_ = 0;
+        moe_experts_ = 0;
+        moe_ff_max_ = 0;
         dense_at_ = 0;
         begin_pass();
         for (int il = 0; il < n_all; ++il)
@@ -1556,9 +1610,12 @@ void Engine::load(const Options& o) {
     std::vector<std::pair<const uint8_t*, size_t>> spans;   // the routed experts in the mapped files
     for (const Layer& L : layers_) {
         if (!L.moe) continue;
-        spans.emplace_back(L.exp_gate, (size_t) n_expert_ * L.gu_stride);
-        if (L.gu_stride == L.gu_bytes) spans.emplace_back(L.exp_up, (size_t) n_expert_ * L.gu_bytes);
-        spans.emplace_back(L.exp_down, (size_t) n_expert_ * L.d_bytes);
+        // The experts in the mapped file, per layer: the gate (or the up alone, ungated), the up when it is a
+        // tensor of its own, and the down.
+        spans.emplace_back(L.exp_gate ? L.exp_gate : L.exp_up, (size_t) L.n_expert * L.gu_stride);
+        if (L.gu_planes == 2 && L.gu_stride == L.gu_bytes)
+            spans.emplace_back(L.exp_up, (size_t) L.n_expert * L.gu_bytes);
+        spans.emplace_back(L.exp_down, (size_t) L.n_expert * L.d_bytes);
     }
     if (!workers_) {   // a later card's engine has the first one's
         if (opt_.stay_near) {   // before any thread that reads the experts is started
@@ -1593,7 +1650,7 @@ void Engine::load_drafter() {
 // Per-token buffers hold rows_ tokens, row after row.
 void Engine::shared_scratch() {
     const size_t n = (size_t) rows_, e = n * n_embd_;
-    const size_t ff = n * std::max({n_ff_, n_ff_shexp_, 2 * n_ff_exp_});
+    const size_t ff = n * std::max({n_ff_, n_ff_shexp_, moe_ff_max_});
     // the draft block works in it too (draft_input()); read() keeps two calls' rows in it
     r_ = fbuf(std::max(streams(), draft_ ? 3 : 1) * (size_t) (read_rows_ > rows_ ? 2 : 1) * rows_ * n_embd_);
     cur_ = fbuf(e);
@@ -1603,15 +1660,15 @@ void Engine::shared_scratch() {
     g_ = fbuf(ff);   // a routed expert's gate and up rows come out of one launch, back to back
     u_ = fbuf(ff);
     h_ = fbuf(ff);
-    d_ = fbuf((size_t) kSumRows * n_embd_);   // the routed experts of a few tokens, until they are added up
+    d_ = fbuf((size_t) kSumRows * moe_out_w());   // the routed experts of a few tokens, until they are added up
     rl_ = fbuf(n * n_expert_);
     logits_ = fbuf((size_t) n_vocab_);
     if (rows_ >= kStageRows && bf16_max_ > 0) wf_ = fbuf(bf16_max_);   // a BF16 matrix as floats, for lin()
     if (mmq_) {
         const size_t rr = n * n_used_;
-        gu_ = fbuf(rr * 2 * n_ff_exp_);
+        gu_ = fbuf(rr * moe_ff_max_);
         hx_ = fbuf(rr * n_ff_exp_);
-        dx_ = fbuf(rr * n_embd_);
+        dx_ = fbuf(rr * moe_out_w());
     }
 }
 
@@ -1646,10 +1703,11 @@ void Engine::alloc() {
     for (int il = 0; il < n_layer_; ++il) {
         Layer& L = layers_[(size_t) il];
         if (!L.moe) continue;
-        L.mmq = opt_.gpu_experts && rows_ >= kStageRows && Mmq::fits((int) L.gu_type, 2 * n_ff_exp_, n_embd_) &&
-                Mmq::fits((int) L.d_type, n_embd_, n_ff_exp_);
+        L.mmq = opt_.gpu_experts && rows_ >= kStageRows &&
+                Mmq::fits((int) L.gu_type, L.gu_planes * L.n_ff_exp, moe_in_w()) &&
+                Mmq::fits((int) L.d_type, moe_out_w(), L.n_ff_exp);
         tiles = tiles || L.mmq;
-        one_expert = std::max(one_expert, 2 * L.gu_bytes + L.d_bytes);
+        one_expert = std::max(one_expert, (size_t) L.gu_planes * L.gu_bytes + L.d_bytes);
     }
     if (tiles) mmq_ = std::make_unique<Mmq>();
 
@@ -1675,7 +1733,7 @@ void Engine::alloc() {
     if (mmq_) {
         const size_t rr = n * n_used_,
                      tab = (3 * rr + 3 * (size_t) n_expert_ + 3 + kClasses * ((size_t) n_expert_ + 1)) * sizeof(int32_t);
-        mq_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_embd_), "scratch");
+        mq_ = dmalloc(Mmq::q8_bytes((int64_t) rr, moe_in_w()), "scratch");
         mq2_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_ff_exp_), "scratch");
         mqx_ = dmalloc(Mmq::q8_bytes(rows_, q_max), "scratch");
         d_ids_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
@@ -1691,7 +1749,8 @@ void Engine::alloc() {
 
         // One layer's experts pass through it at a time, so it never holds more than a layer has.  A model of
         // small experts has a few hundred MiB a layer, and the rest of the default would be VRAM that the
-        // expert cache of a small card does without.
+        // expert cache of a small card does without.  n_expert_ is the model-wide maximum of a layer's routed
+        // experts (expert_count), so it is the most one layer can hand it.
         stage_bytes_ = std::max(std::min((size_t) opt_.stage_mib << 20, (size_t) n_expert_ * one_expert), one_expert);
         chunk_bytes_ = std::max(kChunkBytes, one_expert);
         stage_ = (uint8_t*) dmalloc(stage_bytes_ + 256 + kTail, "the expert staging buffer");
@@ -1901,20 +1960,20 @@ bool Engine::batched(const Layer& L, int n) const { return mmq_ && L.mmq && n >=
 // The router's scores, and the copies of them and of the experts' input to the host.
 void Engine::moe_router(const Layer& L, int n) {
     router_scores(L, n);
-    copy2(rl_, h_rl_, n * n_expert_, xn_, h_x_, n * n_embd_, st_);
+    copy2(rl_, h_rl_, n * n_expert_, moe_in(), h_x_, n * moe_in_w(), st_);
 }
 
 // The routed experts of tokens that come a few at a time.  moe_router() is on its way, with ev_ behind it.  True
 // when experts were computed on the CPU: their sum waits in h_cpu_ for moe_add().  `first` is run once, by the
 // thread that hands the cached experts to the card and ahead of them.
 bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
-    const size_t e_row = (size_t) n_embd_;
+    const size_t e_row = (size_t) moe_out_w();
     Clock::time_point t0 = Clock::now();
     ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
     stats_.route_wait_ms += ms_since(t0);
 
     const float limit = clamp_exp_[(size_t) il];
-    const size_t xq_row = kernels::native_q8_1_bytes(n_embd_);
+    const size_t xq_row = kernels::native_q8_1_bytes(moe_in_w());
     bool any_host = false;
     // A window's tokens together: the CPU reads an expert that several of them chose once.
     for (int at = 0; at < n; at += kCpuRows) {
@@ -1932,7 +1991,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
             int ids[kMaxUsed];
             float w[kMaxUsed];
             route(il, h_rl_ + (size_t) (at + t) * n_expert_, tok_ ? tok_[at + t] : -1, ids, w, route_tmp_.data());
-            for (int k = 0; k < n_used_; ++k) {
+            for (int k = 0; k < L.n_used; ++k) {
                 const size_t e = (size_t) ids[k];
                 ++use_[(size_t) il * n_expert_ + e];
                 if (n_swap_ > 0) recent_[(size_t) il * n_expert_ + e] += 1.f;
@@ -1942,7 +2001,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                 }
                 host_e[n_host] = (int32_t) e;
                 host_k[n_host] = k;
-                host[n_host++] = {L.exp_gate + e * L.gu_stride, L.exp_up + e * L.gu_stride,
+                host[n_host++] = {L.exp_gate ? L.exp_gate + e * L.gu_stride : nullptr, L.exp_up + e * L.gu_stride,
                                   L.exp_down + e * L.d_bytes, w[k], t};
             }
         }
@@ -1969,7 +2028,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
         const std::function<void()> launch = [&] {
             if (split_) cudaSetDevice(device_);   // one of the experts' threads, which every card's engine shares
             if (first && at == 0) (*first)();
-            const size_t ff = (size_t) n_ff_exp_, q8_row = kernels::native_q8_1_bytes(n_ff_exp_);
+            const size_t ff = (size_t) L.n_ff_exp, q8_row = kernels::native_q8_1_bytes((size_t) L.n_ff_exp);
             const int per = rows_ >= kSlots ? kSlots : 1;   // the scratch holds rows_ experts' values
             ScaledRows sum{};
             for (int i0 = 0; i0 < n_cached; i0 += per) {
@@ -1978,31 +2037,33 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                 for (int j = 0; j < m; ++j) {
                     const Cached& c = cached[i0 + j];
                     gate_up.w[j] = c.slot;
-                    gate_up.x[j] = (const uint8_t*) xq_ + (size_t) c.row * xq_row;
-                    gate_up.y[j] = g_ + (size_t) j * 2 * ff;
-                    down.w[j] = c.slot + 2 * L.gu_bytes;
+                    gate_up.x[j] = (const uint8_t*) moe_in_xq() + (size_t) c.row * xq_row;
+                    gate_up.y[j] = g_ + (size_t) j * L.gu_planes * ff;
+                    down.w[j] = c.slot + (size_t) L.gu_planes * L.gu_bytes;
                     down.x[j] = (const uint8_t*) q8_ + (size_t) j * q8_row;
                     down.y[j] = d_ + (size_t) ((i0 + j) % kSumRows) * e_row;
                 }
-                const bool one = m > 1 && kernels::native_mmvq_slots((int) L.gu_type, gate_up, m, n_embd_,
-                                                                      2 * n_ff_exp_, st_);
+                const bool one = m > 1 && kernels::native_mmvq_slots((int) L.gu_type, gate_up, m, moe_in_w(),
+                                                                      L.gu_planes * L.n_ff_exp, st_);
                 for (int j = 0; j < m && !one; ++j)
-                    kernels::native_mmvq((int) L.gu_type, gate_up.w[j], gate_up.x[j], gate_up.y[j], n_embd_,
-                                         2 * n_ff_exp_, 1, st_);
-                if (gelu_) geglu_rows(g_, h_, n_ff_exp_, m, st_);
-                else swiglu_clamp_rows(g_, h_, n_ff_exp_, m, limit, st_);
-                kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, m, st_);
-                if (!(m > 1 && kernels::native_mmvq_slots((int) L.d_type, down, m, n_ff_exp_, n_embd_, st_)))
+                    kernels::native_mmvq((int) L.gu_type, gate_up.w[j], gate_up.x[j], gate_up.y[j], moe_in_w(),
+                                         L.gu_planes * L.n_ff_exp, 1, st_);
+                const float* hsrc = h_;
+                if (L.act == 1) geglu_rows(g_, h_, L.n_ff_exp, m, st_);
+                else if (L.act == 2) { relu2_rows(g_, L.n_ff_exp, m, st_); hsrc = g_; }
+                else swiglu_clamp_rows(g_, h_, L.n_ff_exp, m, limit, st_);
+                kernels::native_quantize_q8_1(hsrc, q8_, L.n_ff_exp, m, st_);
+                if (!(m > 1 && kernels::native_mmvq_slots((int) L.d_type, down, m, L.n_ff_exp, moe_out_w(), st_)))
                     for (int j = 0; j < m; ++j)
-                        kernels::native_mmvq((int) L.d_type, down.w[j], down.x[j], down.y[j], n_ff_exp_, n_embd_, 1,
-                                             st_);
+                        kernels::native_mmvq((int) L.d_type, down.w[j], down.x[j], down.y[j], L.n_ff_exp, moe_out_w(),
+                                             1, st_);
                 for (int j = 0; j < m; ++j) {
                     const Cached& c = cached[i0 + j];
                     const int k = (i0 + j) % kSumRows;
                     sum.x[k] = down.y[j];
-                    sum.acc[k] = fo_ + (size_t) c.row * e_row;
+                    sum.acc[k] = moe_acc() + (size_t) c.row * e_row;
                     sum.w[k] = c.w;
-                    if (k == kSumRows - 1 || i0 + j == n_cached - 1) add_scaled(sum, k + 1, n_embd_, st_);
+                    if (k == kSumRows - 1 || i0 + j == n_cached - 1) add_scaled(sum, k + 1, moe_out_w(), st_);
                 }
             }
         };
@@ -2016,8 +2077,8 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
         }
         any_host = true;
         t0 = Clock::now();
-        cpu_experts(*workers_, host, n_host, m, (int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_,
-                    h_x_ + (size_t) at * e_row, limit, gelu_, cpu,
+        cpu_experts(*workers_, host, n_host, m, (int) L.gu_type, (int) L.d_type, moe_in_w(), L.n_ff_exp,
+                    h_x_ + (size_t) at * moe_in_w(), limit, L.act, cpu,
                     n_cached > 0 || (first && at == 0) ? &launch : nullptr);
         stats_.cpu_ms += ms_since(t0);
     }
@@ -2025,7 +2086,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
 }
 
 // The CPU's experts of n tokens into the routed experts' sum.
-void Engine::moe_add(int n) { axpy(h_cpu_, 1.f, fo_, n * n_embd_, true, st_); }
+void Engine::moe_add(int n) { axpy(h_cpu_, 1.f, moe_acc(), n * moe_out_w(), true, st_); }
 
 // With every routed expert in VRAM, a few tokens' experts are routed on the card and found there by its picks
 // (moe_card()), so a layer never waits for the host.  The cache's slots go to the card again when they changed.
@@ -2034,7 +2095,7 @@ bool Engine::card_moe(int n) {
     bool same = !h_slots_.empty();
     for (int il = lo_; il < hi_ && same; ++il) {
         const Layer& L = layers_[(size_t) il];
-        for (int e = 0; e < n_expert_ && same && L.moe; ++e)
+        for (int e = 0; e < (int) L.slot.size() && same && L.moe; ++e)
             same = h_slots_[(size_t) il * n_expert_ + e] == L.slot[(size_t) e];
     }
     if (!same) {
@@ -2060,18 +2121,20 @@ bool Engine::moe_card(Layer& L, int il, int n) {
         return false;
     }
     L.card = 1;
-    const int rr = n * n_used_;
+    const int rr = n * L.n_used;
     const void* const* table = d_slots_ + (size_t) il * n_expert_;
-    const kernels::MmvqIds gate_up{table, d_ids_, 0, xq_, kernels::native_q8_1_bytes(n_embd_), n_used_, g_,
-                                   2 * (size_t) n_ff_exp_};
-    kernels::native_mmvq_ids((int) L.gu_type, gate_up, rr, n_embd_, 2 * n_ff_exp_, st_);
-    if (gelu_) geglu_rows(g_, h_, n_ff_exp_, rr, st_);
-    else swiglu_clamp_rows(g_, h_, n_ff_exp_, rr, clamp_exp_[(size_t) il], st_);
-    kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_ * rr, 1, st_);   // the rows back to back, as one vector
-    const kernels::MmvqIds down{table, d_ids_, 2 * L.gu_bytes, q8_, kernels::native_q8_1_bytes(n_ff_exp_), 1, d_,
-                                (size_t) n_embd_};
-    kernels::native_mmvq_ids((int) L.d_type, down, rr, n_ff_exp_, n_embd_, st_);
-    moe_sum(d_, d_wts_, fo_, n_embd_, n_used_, n, st_);
+    const kernels::MmvqIds gate_up{table, d_ids_, 0, moe_in_xq(), kernels::native_q8_1_bytes(moe_in_w()), L.n_used,
+                                   g_, (size_t) L.gu_planes * L.n_ff_exp};
+    kernels::native_mmvq_ids((int) L.gu_type, gate_up, rr, moe_in_w(), L.gu_planes * L.n_ff_exp, st_);
+    const float* hsrc = h_;
+    if (L.act == 1) geglu_rows(g_, h_, L.n_ff_exp, rr, st_);
+    else if (L.act == 2) { relu2_rows(g_, L.n_ff_exp, rr, st_); hsrc = g_; }
+    else swiglu_clamp_rows(g_, h_, L.n_ff_exp, rr, clamp_exp_[(size_t) il], st_);
+    kernels::native_quantize_q8_1(hsrc, q8_, L.n_ff_exp * rr, 1, st_);   // the rows back to back, as one vector
+    const kernels::MmvqIds down{table, d_ids_, (size_t) L.gu_planes * L.gu_bytes, q8_,
+                               kernels::native_q8_1_bytes(L.n_ff_exp), 1, d_, (size_t) moe_out_w()};
+    kernels::native_mmvq_ids((int) L.d_type, down, rr, L.n_ff_exp, moe_out_w(), st_);
+    moe_sum(d_, d_wts_, moe_acc(), moe_out_w(), L.n_used, n, st_);
     return true;
 }
 
@@ -2080,7 +2143,7 @@ bool Engine::moe_card(Layer& L, int il, int n) {
 // stagers_ fill them, while the workers compute experts.
 void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone) {
     staged_il_ = -1;   // whatever the buffer held
-    const size_t gu2 = 2 * L.gu_bytes, down_at = pad((size_t) m * gu2);
+    const size_t gu2 = (size_t) L.gu_planes * L.gu_bytes, down_at = pad((size_t) m * gu2);
     const int per = (int) (chunk_bytes_ / (gu2 + L.d_bytes));
     for (int j0 = 0; j0 < m; j0 += per) {
         const size_t c = (size_t) std::min(per, m - j0);
@@ -2088,13 +2151,16 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
         uint8_t* h = h_stage_[stage_turn_];
         const cudaEvent_t left = (cudaEvent_t) ev_stage_[stage_turn_];
         ck(cudaEventSynchronize(left), "expert staging");
+        const int slices = L.gu_planes + 1;
         const auto copy = [&](int i) {
-            const size_t j = (size_t) i / 3, e = (size_t) experts[(size_t) j0 + j];
-            if (i % 3 == 0) std::memcpy(h + j * gu2, L.exp_gate + e * L.gu_stride, L.gu_bytes);
-            else if (i % 3 == 1) std::memcpy(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
+            const size_t j = (size_t) i / slices, e = (size_t) experts[(size_t) j0 + j];
+            const int s = i % slices;
+            if (s == 0) std::memcpy(h + j * gu2, (L.exp_gate ? L.exp_gate : L.exp_up) + e * L.gu_stride, L.gu_bytes);
+            else if (s == 1 && L.gu_planes == 2)
+                std::memcpy(h + j * gu2 + L.gu_bytes, L.exp_up + e * L.gu_stride, L.gu_bytes);
             else std::memcpy(h + c * gu2 + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes);
         };
-        (alone ? *stagers_ : *workers_).run((int) (3 * c), copy);
+        (alone ? *stagers_ : *workers_).run((int) (slices * c), copy);
         ck(cudaMemcpyAsync(stage_ + (size_t) j0 * gu2, h, c * gu2, cudaMemcpyHostToDevice, cs(stream)),
            "expert staging");
         ck(cudaMemcpyAsync(stage_ + down_at + (size_t) j0 * L.d_bytes, h + c * gu2, c * L.d_bytes,
@@ -2112,8 +2178,8 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
 // A call that copies only the experts it routes to leaves a share of them to the CPU, which computes them while
 // the others are copied: the share that had the two take about as long (Options::cpu_share).
 void Engine::moe_rows(Layer& L, int il, int n) {
-    const int rr = n * n_used_;
-    const size_t cap = (size_t) rows_ * n_used_;
+    const int rr = n * L.n_used;
+    const size_t cap = (size_t) rows_ * L.n_used;
     const bool ahead = opt_.stage_ahead > 0 && (n >= opt_.stage_ahead || shared_ahead_);
     const bool spare = !ahead && opt_.cpu_share != 0 && !all_cached();   // the CPU may take some (below)
     // The layer's tables.  tok and place: a row's token, and its place among that token's experts.  bounds: each
@@ -2131,9 +2197,9 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     const bool on_card = route_card(il, n, d_ids_, d_wts_);
     if (on_card) {
         copy2(d_ids_, h_ids_, rr, d_wts_, w, rr, st_);
-        if (spare) copy2(xn_, h_x_, n * n_embd_, nullptr, nullptr, 0, st_);
+        if (spare) copy2(moe_in(), h_x_, n * moe_in_w(), nullptr, nullptr, 0, st_);
     } else if (spare) {
-        copy2(rl_, h_rl_, n * n_expert_, xn_, h_x_, n * n_embd_, st_);
+        copy2(rl_, h_rl_, n * n_expert_, moe_in(), h_x_, n * moe_in_w(), st_);
     } else {
         ck(cudaMemcpyAsync(h_rl_, rl_, (size_t) n * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
            "router");
@@ -2188,8 +2254,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         float* tmp = route_tmp_.data() + (size_t) p * 2 * n_expert_;
         const int end = (int) ((int64_t) n * (p + 1) / parts);
         for (int t = (int) ((int64_t) n * p / parts); t < end; ++t)
-            route(il, h_rl_ + (size_t) t * n_expert_, tok_ ? tok_[t] : -1, ids_.data() + (size_t) t * n_used_,
-                  w + (size_t) t * n_used_, tmp);
+            route(il, h_rl_ + (size_t) t * n_expert_, tok_ ? tok_[t] : -1, ids_.data() + (size_t) t * L.n_used,
+                  w + (size_t) t * L.n_used, tmp);
     });
     count_.assign((size_t) n_expert_, 0);
     for (int i = 0; i < rr; ++i) {
@@ -2203,7 +2269,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     on_cpu_.assign((size_t) n_expert_, 0);
     if (spare) {
         spare_.clear();
-        for (int e = 0; e < n_expert_; ++e)
+        for (int e = 0; e < L.n_expert; ++e)
             if (count_[(size_t) e] > 0 && !L.slot[(size_t) e]) spare_.push_back(e);
         std::stable_sort(spare_.begin(), spare_.end(),
                          [&](int32_t a, int32_t b) { return count_[(size_t) a] < count_[(size_t) b]; });
@@ -2215,7 +2281,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     // The cached experts that have rows, class after class and a class's in the order of the slots (chan_ has
     // every cached expert in that order); the experts already on their way; then the others that have rows.
     chan_.clear();
-    for (int e = 0; e < n_expert_; ++e)
+    for (int e = 0; e < L.n_expert; ++e)
         if (L.slot[(size_t) e]) chan_.push_back(e);
     std::sort(chan_.begin(), chan_.end(),
               [&](int32_t a, int32_t b) { return L.slot[(size_t) a] < L.slot[(size_t) b]; });
@@ -2228,7 +2294,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     group_.insert(group_.end(), L.ahead.begin(), L.ahead.begin() + n_ahead);
     sent_.assign((size_t) n_expert_, 0);
     for (int j = 0; j < n_ahead; ++j) sent_[(size_t) L.ahead[(size_t) j]] = 1;
-    for (int e = 0; e < n_expert_; ++e)
+    for (int e = 0; e < L.n_expert; ++e)
         if (count_[(size_t) e] > 0 && !L.slot[(size_t) e] && !sent_[(size_t) e] && !on_cpu_[(size_t) e])
             group_.push_back(e);
     const int n_group = (int) group_.size();
@@ -2246,16 +2312,16 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     for (int i = 0; i < rr; ++i) {
         const size_t e = (size_t) ids_[(size_t) i];
         if (on_cpu_[e]) {   // by token, as cpu_experts() takes them, and nothing of it in the card's sum
-            host_.push_back({L.exp_gate + e * L.gu_stride, L.exp_up + e * L.gu_stride, L.exp_down + e * L.d_bytes,
-                             w[i], i / n_used_});
+            host_.push_back({L.exp_gate ? L.exp_gate + e * L.gu_stride : nullptr, L.exp_up + e * L.gu_stride,
+                             L.exp_down + e * L.d_bytes, w[i], i / L.n_used});
             w[i] = 0.f;
             continue;
         }
         const int row = first_[e]++;
-        tok[row] = i / n_used_;
+        tok[row] = i / L.n_used;
         place[row] = i;
     }
-    const size_t gu2 = 2 * L.gu_bytes;
+    const size_t gu2 = (size_t) L.gu_planes * L.gu_bytes;
     // a round is what the staging buffer holds at a time; round_ has the first group of each, and the end
     const int per_round = (int) (stage_bytes_ / (gu2 + L.d_bytes));
     round_.assign(1, n_cached);
@@ -2287,12 +2353,12 @@ void Engine::moe_rows(Layer& L, int il, int n) {
 
     const float limit = clamp_exp_[(size_t) il];
     const int gt = (int) L.gu_type, dt = (int) L.d_type;
-    const int64_t ff = n_ff_exp_, ff2 = 2 * ff;
+    const int64_t ff = L.n_ff_exp, ff2 = (int64_t) L.gu_planes * ff;
     int holds = -1;   // the round in the buffer when this call is done
     // The card's part.  With the CPU's beside it, the rows of its experts' places are left at nothing.
     const auto card = [&] {
-        if (n_cpu > 0) ck(cudaMemsetAsync(dx_, 0, (size_t) rr * n_embd_ * sizeof(float), cs(st_)), "expert rows");
-        if (rg > 0) Mmq::quantize(xn_, d_tok, mq_, gt, n_embd_, n_embd_, rg, st_);
+        if (n_cpu > 0) ck(cudaMemsetAsync(dx_, 0, (size_t) rr * moe_out_w() * sizeof(float), cs(st_)), "expert rows");
+        if (rg > 0) Mmq::quantize(moe_in(), d_tok, mq_, gt, moe_in_w(), moe_in_w(), rg, st_);
 
         // The cached experts whose slots lie one behind the other are the matrices of one launch, as the experts of
         // a staging round are; a launch for each class that has rows among them.  The cache is filled a layer's
@@ -2312,16 +2378,18 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             j += m;
         }
         for (const Run& r : runs_)
-            mmq_->mul(slot_of(r.j), gt, ff2, n_embd_, L.slot_bytes, r.m, mq_, d_cb + (size_t) r.c * cb_row + r.j, iota_,
-                      rg, r.most, gu_, ff2, st_);
+            mmq_->mul(slot_of(r.j), gt, ff2, moe_in_w(), L.slot_bytes, r.m, mq_, d_cb + (size_t) r.c * cb_row + r.j,
+                      iota_, rg, r.most, gu_, ff2, st_);
         if (rc > 0) {
-            if (gelu_) geglu_rows(gu_, hx_, n_ff_exp_, rc, st_);
-            else swiglu_clamp_rows(gu_, hx_, n_ff_exp_, rc, limit, st_);
-            Mmq::quantize(hx_, nullptr, mq2_, dt, ff, ff, rc, st_);
+            const float* hsrc = hx_;
+            if (L.act == 1) geglu_rows(gu_, hx_, ff, rc, st_);
+            else if (L.act == 2) { relu2_rows(gu_, ff, rc, st_); hsrc = gu_; }
+            else swiglu_clamp_rows(gu_, hx_, ff, rc, limit, st_);
+            Mmq::quantize(hsrc, nullptr, mq2_, dt, ff, ff, rc, st_);
         }
         for (const Run& r : runs_)
-            mmq_->mul(slot_of(r.j) + gu2, dt, n_embd_, ff, L.slot_bytes, r.m, mq2_, d_cb + (size_t) r.c * cb_row + r.j,
-                      d_place, rc, r.most, dx_, n_embd_, st_);
+            mmq_->mul(slot_of(r.j) + gu2, dt, moe_out_w(), ff, L.slot_bytes, r.m, mq2_,
+                      d_cb + (size_t) r.c * cb_row + r.j, d_place, rc, r.most, dx_, moe_out_w(), st_);
 
         // The round the buffer holds goes first and is not copied.  If it holds none of this call's, the experts
         // that go ahead are copied last, so the next call finds them.  The order does not change a round's launches.
@@ -2348,12 +2416,14 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             if (rows == 0) continue;   // nothing routed to the experts that go ahead
             int most = 0;
             for (int g = g0; g < g0 + m; ++g) most = std::max(most, rows_of(g));
-            mmq_->mul(stage_, gt, ff2, n_embd_, gu2, m, mq_, d_bounds + g0, iota_, rg, most, gu_, ff2, st_);
-            if (gelu_) geglu_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, st_);
-            else swiglu_clamp_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, limit, st_);
-            Mmq::quantize(hx_ + (size_t) r0 * ff, nullptr, mq2_, dt, ff, ff, rows, st_);
-            mmq_->mul(stage_ + down_at, dt, n_embd_, ff, L.d_bytes, m, mq2_, d_rel + (g0 - n_cached + r), d_place + r0,
-                      rows, most, dx_, n_embd_, st_);
+            mmq_->mul(stage_, gt, ff2, moe_in_w(), gu2, m, mq_, d_bounds + g0, iota_, rg, most, gu_, ff2, st_);
+            const float* hsrc = hx_ + (size_t) r0 * ff;
+            if (L.act == 1) geglu_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, ff, rows, st_);
+            else if (L.act == 2) { relu2_rows(gu_ + (size_t) r0 * ff2, ff, rows, st_); hsrc = gu_ + (size_t) r0 * ff2; }
+            else swiglu_clamp_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, ff, rows, limit, st_);
+            Mmq::quantize(hsrc, nullptr, mq2_, dt, ff, ff, rows, st_);
+            mmq_->mul(stage_ + down_at, dt, moe_out_w(), ff, L.d_bytes, m, mq2_, d_rel + (g0 - n_cached + r),
+                      d_place + r0, rows, most, dx_, moe_out_w(), st_);
         }
         ck(cudaEventRecord((cudaEvent_t) ev_free_, cs(st_)), "expert staging");
     };
@@ -2370,8 +2440,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             ck(cudaStreamSynchronize(cs(st_)), "expert staging");
             done = Clock::now();
         });
-        cpu_experts(*workers_, host_.data(), (int) host_.size(), n, gt, dt, n_embd_, n_ff_exp_, h_x_, limit, gelu_,
-                    h_cpu_, nullptr);
+        cpu_experts(*workers_, host_.data(), (int) host_.size(), n, gt, dt, moe_in_w(), L.n_ff_exp, h_x_, limit,
+                    L.act, h_cpu_, nullptr);
         const double cpu = ms_since(start);
         behind.wait();
         const double gpu = std::chrono::duration<double, std::milli>(done - start).count();
@@ -2383,7 +2453,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             share_[size] = std::clamp(0.5 * share_[size] + 0.5 * g / (c + g), 0.05, 0.95);
         }
     }
-    moe_sum(dx_, d_w, fo_, n_embd_, n_used_, n, st_);
+    moe_sum(dx_, d_w, moe_acc(), moe_out_w(), L.n_used, n, st_);
     if (n_cpu > 0) moe_add(n);
     if (ahead && holds >= 0) {
         staged_.assign(group_.begin() + round_[(size_t) holds], group_.begin() + round_[(size_t) holds + 1]);
@@ -2584,7 +2654,7 @@ void Engine::run(const int32_t* tokens, int n) {
         if (!card) return false;
         if (replay && L.card == 1) replayed(L.card_moe, rec, [&] { moe_card(L, il, m); });
         else if (!moe_card(L, il, m)) return false;
-        stats_.gpu_experts += m * n_used_;
+        stats_.gpu_experts += m * L.n_used;
         return true;
     };
     // Once every layer has shown that, a call's layers are one recording: on an RTX 5090 the card waited 2 to 4
@@ -2610,7 +2680,7 @@ void Engine::run(const int32_t* tokens, int n) {
                 }
             });
         ck(cudaGraphLaunch((cudaGraphExec_t) pass, cs(st_)), "layer graph");
-        for (int il = lo_; il < hi_; ++il) stats_.gpu_experts += layers_[(size_t) il].moe ? n * n_used_ : 0;
+        for (int il = lo_; il < hi_; ++il) stats_.gpu_experts += layers_[(size_t) il].moe ? n * layers_[(size_t) il].n_used : 0;
         return;
     }
     for (int il = lo_; il < hi_; ++il) {

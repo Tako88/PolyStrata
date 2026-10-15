@@ -9,6 +9,7 @@
 // native_mmvq and MMQ.  All of them quantize their input to 8 bits, so none is exact; the test fails when one is
 // far from the reference.  A model in several files: give the file that holds the tensors to check.
 #include "cpu_experts.hpp"
+#include "engine.hpp"
 #include "mmq.hpp"
 
 #include "strata/artifact/gguf_reader.hpp"
@@ -146,7 +147,7 @@ int main(int argc, char** argv) {
 
                 std::vector<float> cpu((size_t) n_embd), dev((size_t) n_embd);
                 const poly::CpuExpert ce{gate, up, down, 1.f};
-                poly::cpu_experts(workers, &ce, 1, 1, (int) tg.type, (int) td.type, n_embd, n_ff, x.data(), limit, false,
+                poly::cpu_experts(workers, &ce, 1, 1, (int) tg.type, (int) td.type, n_embd, n_ff, x.data(), limit, 0,
                                  cpu.data());
                 const double e_cpu = rel_error(cpu.data(), want);
                 double e_gpu = 0.0;
@@ -278,6 +279,57 @@ int main(int argc, char** argv) {
                         n_out, e_vec, tile ? std::to_string(e_mat).c_str() : "(no tile)", pass ? "" : "  FAIL",
                         t->name.c_str());
             for (void* p : {(void*) d_w, (void*) d_xb, (void*) d_y, d_q, d_mq}) ck(cudaFree(p));
+        }
+
+        // M1: the per-layer expert geometry on synthetic layers.  A file may give each layer its own routed-expert
+        // count, width and gate|up planes; a layer that leaves them 0 takes the model-wide scalars, and the
+        // engine's slot size, its model-wide expert total, its widest gate|up and its profile stride follow the
+        // layer.  The arithmetic here is the one load_moe(), total_experts(), moe_ff_max_ and read_profile() use.
+        {
+            const int n_expert = 496, n_used = 9, n_ff_exp = 2560;
+            poly::Layer a{}, b{}, c{};
+            a.moe = b.moe = c.moe = true;
+            a.n_expert = 240; a.n_used = 9; a.n_ff_exp = 1536; a.gu_planes = 2;   // its own, gate and up
+            a.gu_bytes = 4096; a.d_bytes = 8192;
+            b.n_expert = 368; b.n_used = 6; b.n_ff_exp = 2560; b.gu_planes = 1;   // ungated: the up alone
+            b.gu_bytes = 5120; b.d_bytes = 10240;
+            // load_moe(): a layer that set nothing keeps the model's own
+            c.n_expert = c.n_expert ? c.n_expert : n_expert;
+            c.n_used = c.n_used ? c.n_used : n_used;
+            c.n_ff_exp = c.n_ff_exp ? c.n_ff_exp : n_ff_exp;
+            const auto slot = [](const poly::Layer& L) { return (size_t) L.gu_planes * L.gu_bytes + L.d_bytes; };
+            const int total = a.n_expert + b.n_expert + c.n_expert;   // Engine::total_experts()
+            const int ff_max = std::max({(int) (a.gu_planes * a.n_ff_exp), (int) (b.gu_planes * b.n_ff_exp),
+                                         (int) (c.gu_planes * c.n_ff_exp)});   // Engine::moe_ff_max_
+            // A profile line is written and read at the model-wide stride, whatever a layer's own count is.
+            const auto idx = [&](int il, int e) { return (size_t) il * n_expert + (size_t) e; };
+            std::vector<int64_t> profile((size_t) 3 * n_expert, 0);
+            profile[idx(1, 367)] = 1234;
+            const bool prof = profile[idx(1, 367)] == 1234 && profile[idx(1, 240)] == 0 &&
+                              (int) (idx(1, 367) / (size_t) n_expert) == 1 &&
+                              (int) (idx(1, 367) % (size_t) n_expert) == 367;
+            const bool geom = slot(a) == 2 * 4096 + 8192 && slot(b) == 1 * 5120 + 10240 &&
+                              c.n_expert == n_expert && c.n_ff_exp == n_ff_exp && total == 240 + 368 + 496 &&
+                              ff_max == 2 * 2560;
+            // M1's load_moe() invariant: an ungated layer (gu_planes 1) needs ReLU² (act 2), a gated one must not
+            // use it.  The two wrong pairings throw; the three right ones do not.
+            const std::tuple<int, int, bool> act_cases[] = {{1, 0, true}, {1, 2, false}, {2, 2, true},
+                                                            {2, 0, false}, {2, 1, false}};
+            bool act_ok = true;
+            for (const auto& [planes, act, want_throw] : act_cases) {
+                bool threw = false;
+                try {
+                    poly::check_moe_activation(planes, act, "test: ");
+                } catch (const std::exception&) {
+                    threw = true;
+                }
+                if (threw != want_throw) act_ok = false;
+            }
+            ok = ok && geom && prof && act_ok;
+            std::printf("per-layer geometry: slots %zu and %zu, total %d, gate|up max %d, profile at the model-wide "
+                        "stride: %s\n", slot(a), slot(b), total, ff_max, geom && prof ? "ok" : "FAIL");
+            std::printf("per-layer activation invariant (ungated needs ReLU², gated must not): %s\n",
+                        act_ok ? "ok" : "FAIL");
         }
         return ok ? 0 : 1;
     } catch (const std::exception& e) {

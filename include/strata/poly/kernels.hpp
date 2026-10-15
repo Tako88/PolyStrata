@@ -119,6 +119,8 @@ void swiglu_clamp_rows(const float* gate_up, float* out, int n, int rows, float 
 void geglu(const float* gate, const float* up, float* out, int n, void* stream);
 /// geglu for rows that each hold n gate values and then n up values; out has n values a row.
 void geglu_rows(const float* gate_up, float* out, int n, int rows, void* stream);
+/// relu(x)², in place, for rows that each hold n values: an ungated expert's up output.
+void relu2_rows(float* x, int n, int rows, void* stream);
 /// The routing of `rows` tokens from their router scores (n_expert a token, times in_scale), as an architecture's
 /// route() does it on the host: probabilities by `gate` (0 softmax, 1 sigmoid, 2 sqrt(softplus)), the n_used
 /// largest of the probabilities plus `bias` (null: none), the lower expert first among equals; their weights are the

@@ -22,6 +22,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -103,6 +104,13 @@ struct Dev {
     int n_in = 0, n_out = 0;
 };
 
+/// An ungated layer's experts have no gate to multiply by, so they must use ReLU² (act 2); a layer with a gate
+/// must use a gated activation (act 0 or 1) instead.  `where` names the layer in the error message.
+inline void check_moe_activation(int gu_planes, int act, const std::string& where) {
+    if ((gu_planes == 1) != (act == 2))
+        throw std::runtime_error(where + "ungated experts need ReLU² (act 2), gated ones a gated activation");
+}
+
 /// What a layer has in every architecture.  Its attention's weights, and a dense FFN's, are the architecture's.
 struct Layer {
     bool moe = false;
@@ -110,6 +118,10 @@ struct Layer {
     bool fixed = false;   ///< one token's launches can be recorded and replayed for the next ones (eval()): they
                           ///< are the same for every token, or read the position on the card (Engine::at_)
     Dev attn_norm, ffn_norm;   ///< the norms ahead of the attention and of the FFN
+    int n_expert = 0, n_used = 0, n_ff_exp = 0;  ///< this layer's routed experts (0: the model's own, written back
+                                                ///< by load_moe())
+    uint8_t gu_planes = 2;    ///< 1: the experts have no gate (ffn_up_exps alone), 2: a gate and an up
+    uint8_t act = 0;          ///< the routed experts' activation: 0 SiLU-gated, 1 GELU-gated, 2 ReLU² (ungated)
     // MoE
     Dev gate_inp, sh_gate, sh_up, sh_down;
     const uint8_t* exp_gate = nullptr;  ///< n_expert experts back to back, in the mapped file
@@ -266,7 +278,7 @@ public:
 
     const Stats& stats() const;
     int cached_experts() const { return cached_ + (next_ ? next_->cached_experts() : 0); }
-    int total_experts() const { return n_moe_ * n_expert_ + (next_ ? next_->total_experts() : 0); }
+    int total_experts() const { return moe_experts_ + (next_ ? next_->total_experts() : 0); }
     double cached_gib() const { return double(exp_at_) / double(1ull << 30) + (next_ ? next_->cached_gib() : 0); }
     /// The cache as load() filled it, which is as large as resize_cache() makes it again.
     int full_experts() const { return full_cached_ + (next_ ? next_->full_experts() : 0); }
@@ -385,7 +397,14 @@ protected:
     bool runs(int il) const { return il >= lo_ && (il < hi_ || hi_ == n_layer_); }
     size_t card_state_bytes() const { return state_n_ * sizeof(float) + extra_bytes(); }
     /// Every expert of this engine's layers is in its cache.
-    bool all_cached() const { return cached_ == n_moe_ * n_expert_; }
+    bool all_cached() const { return cached_ == moe_experts_; }
+    // The experts' side of a MoE layer, with the model-wide buffers as the default and a latent MoE's own, set
+    // per layer by the architecture's head, when there are any.  The widths follow the same rule.
+    const float* moe_in() const { return moe_in_ ? moe_in_ : xn_; }
+    const void* moe_in_xq() const { return moe_in_xq_ ? moe_in_xq_ : xq_; }
+    float* moe_acc() const { return moe_acc_ ? moe_acc_ : fo_; }
+    int moe_in_w() const { return moe_in_w_ ? moe_in_w_ : n_embd_; }
+    int moe_out_w() const { return moe_out_w_ ? moe_out_w_ : n_embd_; }
     /// The rows a call of n tokens leaves in r_, to h (pinned) for the next card's engine, which goes on from them.
     void hand_on(int64_t pos, int n, float* h);
     float* pass_rows(int n);
@@ -399,6 +418,11 @@ protected:
     const MetaValue* meta_in(const Shards& g, const char* key) const;
     /// A number of the model's shape, which its file must have.
     int shape_i(const char* key) const;
+    /// A number of the model's shape that is the same for every layer, or the largest of a per-layer array.
+    /// `what` names the key in the error, as shape_i() names it.
+    int shape_i_or_max(const char* key, const char* what) const;
+    /// A per-layer number of the model's shape: a scalar, or the value at `il` of an array of n_layer_ values.
+    int shape_layer(const char* key, int il) const;
     float shape_f(const char* key) const;
     void load_shape();
     void load_moe(int il, bool shared = true);
@@ -510,6 +534,15 @@ protected:
     int n_embd_ = 0, n_layer_ = 0, n_vocab_ = 0;
     int n_ff_ = 0;            ///< a dense FFN's width, in the architectures that have one
     int n_expert_ = 0, n_used_ = 0, n_ff_exp_ = 0, n_ff_shexp_ = 0, n_moe_ = 0;
+    int moe_experts_ = 0;     ///< the routed experts of this engine's MoE layers together (the sum of L.n_expert)
+    int moe_ff_max_ = 0;      ///< the widest gate|up the routed experts multiply (the largest L.gu_planes * L.n_ff_exp)
+    // The experts' input vector (default xn_) and its width (default n_embd_), the quantized copy of it (default
+    // xq_), and the buffer the routed sum is written into (default fo_).  A latent MoE (nemotron_h_moe) points
+    // these at its own, narrower buffers, set per layer as its head runs.
+    const float* moe_in_ = nullptr;
+    const void* moe_in_xq_ = nullptr;
+    float* moe_acc_ = nullptr;
+    int moe_in_w_ = 0, moe_out_w_ = 0;
     int rows_ = 1;            ///< tokens the scratch is sized for
     int read_rows_ = 1;       ///< the most tokens read() takes
     // read()'s calls between two layers: r_ holds two calls' rows, and with more calls than that the others'
@@ -524,7 +557,9 @@ protected:
     void* ev_in_[2] = {};     ///< marks a call's rows in each half of r_
     void* ev_out_[2] = {};    ///< marks the card done with a call in each half
     float rms_eps_ = 0;
-    bool gelu_ = false;       ///< the routed experts' activation: GELU of the gate, else SiLU within the layer's limits
+    // The routed experts' activation: 0 SiLU-gated, 1 GELU-gated (gemma4), 2 ReLU² (ungated).  A layer's own
+    // L.act wins; this is the default for an architecture whose experts all share one activation.
+    uint8_t act_ = 0;
     std::vector<float> clamp_exp_, clamp_shexp_;   ///< a layer's SwiGLU limits: the routed experts', the shared one's
 
     std::vector<Layer> layers_;   ///< the model's, and after them the draft block

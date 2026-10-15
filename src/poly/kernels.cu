@@ -850,6 +850,15 @@ __global__ void geglu_rows_kernel(const float* __restrict__ gate_up, float* __re
     out[size_t(blockIdx.y) * n + i] = gelu(row[i]) * row[n + i];
 }
 
+// An ungated expert's activation: relu(x)², in place.  A row holds n values, nothing beside them.
+__global__ void relu2_rows_kernel(float* __restrict__ x, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float* row = x + size_t(blockIdx.y) * n;
+    const float v = row[i];
+    row[i] = v > 0.0f ? v * v : 0.0f;
+}
+
 // A warp a token, a lane every 32nd expert.  The pick is the host's: the n_used largest of the probabilities plus
 // the bias, the lower expert first among equals, one after the other.
 constexpr int ROUTE_PER = 16;   // experts a lane: up to 512
@@ -2286,6 +2295,10 @@ void geglu(const float* gate, const float* up, float* out, int n, void* stream) 
 
 void geglu_rows(const float* gate_up, float* out, int n, int rows, void* stream) {
     geglu_rows_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(gate_up, out, n);
+}
+
+void relu2_rows(float* x, int n, int rows, void* stream) {
+    relu2_rows_kernel<<<dim3(grid(n, 256), rows), 256, 0, cs(stream)>>>(x, n);
 }
 
 void route_rows(const float* logits, int n_expert, int n_used, int rows, int gate, float in_scale, const float* bias,

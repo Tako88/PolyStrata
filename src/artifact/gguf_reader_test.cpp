@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -58,6 +59,48 @@ std::filesystem::path write_gguf(const std::vector<std::string>& names, bool hea
     }
     if (!header_only) b.resize((b.size() + 31) / 32 * 32 + 32 * names.size(), 0);
     const auto path = std::filesystem::temp_directory_path() / "strata_gguf_reader_test.gguf";
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(b.data()), (std::streamsize)b.size());
+    return path;
+}
+
+// The metadata values this test writes: an INT32, an INT32 array, a STRING array (the GGUF MetaType ids 5, 9, 8).
+std::vector<uint8_t> i32_value(int32_t x) {
+    std::vector<uint8_t> v;
+    put<uint32_t>(v, 5);   // I32
+    put<int32_t>(v, x);
+    return v;
+}
+std::vector<uint8_t> i32_array_value(const std::vector<int32_t>& xs) {
+    std::vector<uint8_t> v;
+    put<uint32_t>(v, 9);   // ARRAY
+    put<uint32_t>(v, 5);   // of I32
+    put<uint64_t>(v, xs.size());
+    for (int32_t x : xs) put<int32_t>(v, x);
+    return v;
+}
+std::vector<uint8_t> str_array_value(const std::vector<std::string>& xs) {
+    std::vector<uint8_t> v;
+    put<uint32_t>(v, 9);   // ARRAY
+    put<uint32_t>(v, 8);   // of STRING
+    put<uint64_t>(v, xs.size());
+    for (const std::string& s : xs) put_str(v, s);
+    return v;
+}
+
+// A metadata-only GGUF v3 (no tensors) with the KV entries given.  Padded, so the reader opens it and get()
+// sees every key.
+std::filesystem::path write_gguf_kv(const std::vector<std::pair<std::string, std::vector<uint8_t>>>& kvs) {
+    std::vector<uint8_t> b;
+    put<uint32_t>(b, 0x46554747u);   // "GGUF"
+    put<uint32_t>(b, 3);
+    put<uint64_t>(b, 0);             // n_tensors
+    put<uint64_t>(b, kvs.size());    // n_kv
+    for (const auto& kv : kvs) {
+        put_str(b, kv.first);
+        b.insert(b.end(), kv.second.begin(), kv.second.end());
+    }
+    b.resize((b.size() + 31) / 32 * 32);
+    const auto path = std::filesystem::temp_directory_path() / "strata_gguf_reader_meta_test.gguf";
     std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(b.data()), (std::streamsize)b.size());
     return path;
 }
@@ -123,6 +166,68 @@ int main() {
         std::filesystem::remove(path);
         check(err.find("data section starts past EOF") != std::string::npos,
               "one tensor, ends before the aligned data start: refused at open");
+    }
+    // A per-layer array is read layer by layer: a numeric array of a model's layer count is kept whole, a scalar
+    // is every layer's value, a short array is refused by name, and a string array stays a sample.
+    {
+        std::vector<int32_t> xs(88);
+        for (int i = 0; i < 88; ++i) xs[(size_t) i] = 1000 + i;
+        const auto path = write_gguf_kv({{"nemotron_h_moe.head_count_kv", i32_array_value(xs)}});
+        bool ok = false;
+        try {
+            strata::GgufFile g(path.string());
+            const strata::MetaValue* v = g.get("nemotron_h_moe.head_count_kv");
+            ok = v && v->type == strata::MetaType::ARRAY && v->items.size() == 88 &&
+                 strata::meta_layer_value(*v, 0, 88) == 1000 && strata::meta_layer_value(*v, 87, 88) == 1087;
+        } catch (const std::exception& e) {
+            std::printf("  (%s)\n", e.what());
+        }
+        std::filesystem::remove(path);
+        check(ok, "a numeric array of 88: all 88 kept, meta_layer_value() reads the last");
+    }
+    {
+        const auto path = write_gguf_kv({{"nemotron_h_moe.expert_used_count", i32_value(9)}});
+        bool ok = false;
+        try {
+            strata::GgufFile g(path.string());
+            const strata::MetaValue* v = g.get("nemotron_h_moe.expert_used_count");
+            ok = v && strata::meta_layer_value(*v, 0, 88) == 9 && strata::meta_layer_value(*v, 87, 88) == 9;
+        } catch (const std::exception& e) {
+            std::printf("  (%s)\n", e.what());
+        }
+        std::filesystem::remove(path);
+        check(ok, "a scalar: the same value for every layer");
+    }
+    {
+        const auto path = write_gguf_kv({{"nemotron_h_moe.feed_forward_length", i32_array_value({1, 2, 3})}});
+        bool threw = false;
+        std::string msg;
+        try {
+            strata::GgufFile g(path.string());
+            const strata::MetaValue* v = g.get("nemotron_h_moe.feed_forward_length");
+            (void) strata::meta_layer_value(*v, 87, 88);
+        } catch (const std::exception& e) {
+            threw = true;
+            msg = e.what();
+        }
+        std::filesystem::remove(path);
+        check(threw, "a 3-value array for 88 layers: meta_layer_value() throws");
+        check(msg.find("88") != std::string::npos, "  the error names the layer count");
+    }
+    {
+        std::vector<std::string> toks(131072);
+        for (size_t i = 0; i < toks.size(); ++i) toks[i] = "t" + std::to_string(i);
+        const auto path = write_gguf_kv({{"tokenizer.ggml.tokens", str_array_value(toks)}});
+        bool ok = false;
+        try {
+            strata::GgufFile g(path.string());
+            const strata::MetaValue* v = g.get("tokenizer.ggml.tokens");
+            ok = v && v->type == strata::MetaType::ARRAY && v->count == 131072 && v->items.size() == 64;
+        } catch (const std::exception& e) {
+            std::printf("  (%s)\n", e.what());
+        }
+        std::filesystem::remove(path);
+        check(ok, "a 131,072-entry string array: still sampled to 64, count kept");
     }
     std::printf(g_fail ? "gguf_reader_test: %d FAILED\n" : "gguf_reader_test: all passed\n", g_fail);
     return g_fail ? 1 : 0;

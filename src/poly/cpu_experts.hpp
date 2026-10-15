@@ -64,13 +64,14 @@ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::str
 bool mxfp4_block_to_q5_0(const uint8_t* src, uint8_t* dst);
 
 /// For each of `rows` tokens, with n_embd values of x and of out each:
-/// out = sum over the token's experts of weight * down(silu(min(gate x, limit)) * clamp(up x, -limit, limit)),
-/// or with `gelu` of weight * down(gelu(gate x) * up x), in the tanh form of GELU the GPU experts compute.
+/// out = sum over the token's experts of weight * down(act of the expert's matrices), where `act` is
+/// 0: silu(min(gate x, limit)) * clamp(up x, -limit, limit), 1: gelu(gate x) * up x in the tanh form the GPU
+/// experts compute, and 2: relu²(up x) — the expert is ungated (its `gate` is null) and only `up` is read.
 /// The n experts come token after token, a token's together.  An expert that several of the tokens use is read
 /// once for all of them: reading it is most of the work.  A token's result is the one it has in a call of its own.
 /// `meanwhile`, when given, is run once by one of the threads, beside the first products.  It must not throw.
 void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int d_type, int n_embd,
-                 int n_ff, const float* x, float limit, bool gelu, float* out,
+                 int n_ff, const float* x, float limit, int act, float* out,
                  const std::function<void()>* meanwhile = nullptr);
 
 }  // namespace strata::poly
