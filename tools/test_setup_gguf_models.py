@@ -26,6 +26,7 @@ NEW = {
     "gemma4": ("UD-Q3_K_M", "gemma-4-26B-A4B-it-UD-Q3_K_M.gguf", "unsloth/gemma-4-26B-A4B-it-GGUF", 12728497888),
     "tiel": ("UD-Q3_K_XL", "Tiel-Coder-35B-A3B-MTP-UD-Q3_K_XL.gguf", "peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP",
              17234935648),
+    "lfm2": ("Q4_K_M", "LFM2.5-24B-A2B-Q4_K_M.gguf", "LiquidAI/LFM2.5-24B-A2B-GGUF", 14526258464),
 }
 # family: its other sizes in setup's order, the smaller and then the larger: (size, file, bytes)
 MORE = {
@@ -37,6 +38,7 @@ MORE = {
                ("UD-Q4_K_M", "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf", 16947541728)],
     "tiel": [("UD-IQ3_XXS", "Tiel-Coder-35B-A3B-MTP-UD-IQ3_XXS.gguf", 13600579424),
              ("UD-Q4_K_XL", "Tiel-Coder-35B-A3B-MTP-UD-Q4_K_XL.gguf", 22749880160)],
+    "lfm2": [("Q6_K", "LFM2.5-24B-A2B-Q6_K.gguf", 19689405728)],
 }
 
 
@@ -59,10 +61,12 @@ class Pins(unittest.TestCase):
                 self.assertLess(d["arena_gb"], d["download_gb"])        # the experts are part of the file
                 self.assertEqual(d["ram_gb"], round(setup.poly_ram_need(d, 8.0)), size)
             # the image encoder is pinned too; it is downloaded when images are wanted, so it has its own size
-            self.assertEqual(list(fam["sha256"]), [*(file for _, file, _ in sizes), *more, fam["mmproj"]])
+            if fam.get("vision"):   # lfm2 has none
+                self.assertEqual(list(fam["sha256"]), [*(file for _, file, _ in sizes), *more, fam["mmproj"]])
             for pinned in fam["sha256"].values():
                 self.assertRegex(pinned[1], r"^[0-9a-f]{64}$")
-            self.assertAlmostEqual(fam["sha256"][fam["mmproj"]][0] / 1e9, fam["vision_gb"], delta=0.05)
+            if fam.get("vision"):
+                self.assertAlmostEqual(fam["sha256"][fam["mmproj"]][0] / 1e9, fam["vision_gb"], delta=0.05)
 
     def test_two_families_have_a_size_of_one_name(self):
         q, g = setup.FAMILIES["qwen36"]["models"]["UD-Q3_K_M"], setup.FAMILIES["gemma4"]["models"]["UD-Q3_K_M"]
@@ -117,11 +121,17 @@ class Estimates(unittest.TestCase):
             for other in ("gfx1100", "gfx1101", "gfx1201", None):           # an unmeasured AMD card: refused
                 self.assertIn("AMD", setup.poly_verdict(d, 64, 24.0, True, arch=other))
                 self.assertFalse(setup.poly_fits(d, 64, 24.0, True, arch=other))
-        for family in ("glm", "ornith", "gemma4", "tiel"):                  # not measured on an AMD card
+        for family in ("glm", "ornith", "gemma4"):                   # not measured on an AMD card
             for size, d in setup.family_models(family).items():
                 self.assertNotIn("hip_archs", d, f"{family} {size}")
                 self.assertIn("AMD", setup.poly_verdict(d, 64, 24.0, True, arch="gfx1200"))
                 self.assertFalse(setup.poly_fits(d, 64, 24.0, True, arch="gfx1200"))
+        for size, d in setup.family_models("tiel").items():          # measured too, at UD-Q4_K_XL (d90506f3)
+            if size == "UD-Q4_K_XL":
+                self.assertEqual(d["hip_archs"], setup.POLY_HIP_ARCHS, size)
+            else:
+                self.assertNotIn("hip_archs", d, f"tiel {size}")
+        # lfm2's sizes are in tools/test_setup_lfm2.py
         # the reserve setup writes instead of the engine's own default on that card (M4.6's failing server runs)
         self.assertEqual(setup.POLY_HIP_RESERVE_MIB, 2048)
 
@@ -173,7 +183,10 @@ class Main(unittest.TestCase):
                 self.assertEqual(cfg["display_name"], f"{fam['title']} {size}")
                 self.assertEqual(Path(cfg["exe"]), self.t / setup.ENGINE_POLY_DIR / setup.POLY_EXE)
                 self.assertIn("experts fit in VRAM (100% on a 32 GB card)", out)
-                self.assertNotIn("has run on no card", out)   # each has run on one of 8 GB
+                if family == "lfm2":    # measured on one 16 GB card, not on the 8 GB this test's PC reports
+                    self.assertIn("has run on no card under 32 GB", out)
+                else:                   # each has run on one of 8 GB
+                    self.assertNotIn("has run on no card", out)
                 self.assertEqual((self.encoder, cfg.get("vision")), ("none", None))   # --yes: no images
 
     def test_a_hybrid_cpu_gets_a_thread_count(self):
@@ -191,6 +204,8 @@ class Main(unittest.TestCase):
     def test_images(self):
         for family, (size, file, _repo, _n) in NEW.items():
             fam = setup.FAMILIES[family]
+            if not fam.get("vision"):       # lfm2 reads no pictures: --vision is unused
+                continue
             folder = self.t / "models" / (fam["tag"] + size)
             # (the card's VRAM, --vision) -> where the encoder runs: a small card keeps its VRAM for the model
             for vram, asked, where in ((31.84, "yes", "gpu"), (8.0, "yes", "cpu"), (12.0, "gpu", "gpu")):

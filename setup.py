@@ -24,8 +24,9 @@ GLM 5.3 Flash (--family glm, docs/GLM.md) is a second model with an engine of it
 NVIDIA card.  Its setup asks for the context and the conversation cache and has no steps for a pack or images.  The
 model has one draft block for all its sizes: a size whose file leaves it out gets the block alone (~2.8 GB).
 
-That engine also runs Qwen3.6-35B-A3B (--family qwen36), Ornith 1.5 (--family ornith) and Gemma 4 26B-A4B (--family
-gemma4) from one GGUF each, 13 to 17 GB (docs/BACKENDS.md).  Their setup is GLM's, with nothing more to fetch.
+That engine also runs Qwen3.6-35B-A3B (--family qwen36), Ornith 1.5 (--family ornith), Gemma 4 26B-A4B (--family
+gemma4) and LFM2.5-24B-A2B (--family lfm2) from one GGUF each, 13 to 20 GB (docs/BACKENDS.md).  Their setup is
+GLM's, with nothing more to fetch.
 
 Options: --family qwen|swift|..., --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
 (--rope-scale F; past the trained 262144 the setup adds yarn and the factor is the final context over 262144,
@@ -82,6 +83,7 @@ HF_REVISIONS = {
     "mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF": "4c326713c52d13fdb40983a2a09a46cca8e88739",             # 2026-10-05
     "unsloth/gemma-4-26B-A4B-it-GGUF": "c099eb48e663fd284577b04978a94ffccb261841",                     # 2026-10-05
     "peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP": "bbe9e566f39e4fc9652ac66b71968289a03c520a",        # 2026-09-10
+    "LiquidAI/LFM2.5-24B-A2B-GGUF": "0912d33141f77e10705345a6732bfd83f0252fdc",                       # 2026-10-13
 }
 
 
@@ -498,6 +500,25 @@ FAMILIES = {
                         (22749880160, "54f46c4ce544c225122b0f066c2336f10404be7bc53b0cc94d1dbbc5e826bdc1"),
                         "mmproj-BF16.gguf":
                         (902822016, "d9ce31026d1cb1f3f8d5152e2e2a014d9d2b302b6c93a7dc07bb0a0487f52837")}},
+    # LFM2.5-24B-A2B is llama.cpp's lfm2moe, run by strata-poly from one GGUF: no pack, no image encoder, no draft
+    # block.  "row_bytes" is its attention-cache cost a token (10 attention layers x 2 x 8 kv x 64 head_dim x 2).
+    "lfm2": {"title": "LFM2.5-24B-A2B", "by": "LiquidAI",
+             "about": "on the strata-poly engine too; a 15 GB file, ~19 GB of RAM beside an 8 GB card; a larger "
+                      "size too",
+             "hf": hf("LiquidAI/LFM2.5-24B-A2B-GGUF"), "file": "LFM2.5-24B-A2B-{q}.gguf", "shards": 1,
+             "tag": "lfm2-", "name": "lfm2.5-24b-a2b", "engine": "poly", "vision": False, "experimental": True,
+             "row_bytes": 20480,
+             "models": {"Q4_K_M": {"about": "4-bit K-quant experts, 6-bit where they write; the better fit for a "
+                                             "16 GB card",
+                                   "download_gb": 14.5, "ram_gb": 19, "arena_gb": 13.816,
+                                   "vram_beside_gb": 3.9, "hip_archs": POLY_HIP_ARCHS},
+                        "Q6_K": {"about": "6-bit K-quant experts: better quality, more RAM",
+                                 "download_gb": 19.7, "ram_gb": 24, "arena_gb": 18.648,
+                                 "vram_beside_gb": 4.1, "hip_archs": POLY_HIP_ARCHS}},
+             "sha256": {"LFM2.5-24B-A2B-Q4_K_M.gguf":
+                        (14526258464, "d3334405b96228eb9908cdebb5c6194908f2da64282bda852afc3a3910c64e7d"),
+                        "LFM2.5-24B-A2B-Q6_K.gguf":
+                        (19689405728, "4c5f34cb94d4a29f0360d04eaa274bb1361ceae163f40f6361cb75d1bee139c2")}},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
@@ -5750,7 +5771,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--family", choices=list(FAMILIES),
                     help="qwen = Qwen3.8-Flash-Next, swift = Swift 1.5, glm = GLM 5.3 Flash (docs/GLM.md), qwen36 = "
-                         "Qwen3.6-35B-A3B, ornith = Ornith 1.5, gemma4 = Gemma 4 26B-A4B (docs/BACKENDS.md)")
+                         "Qwen3.6-35B-A3B, ornith = Ornith 1.5, gemma4 = Gemma 4 26B-A4B, lfm2 = LFM2.5-24B-A2B "
+                         "(docs/BACKENDS.md)")
     ap.add_argument("--model", choices=list(dict.fromkeys(
         [*MODELS, *(m for f in FAMILIES.values() for m in f.get("models", {}))])))
     ap.add_argument("--context", type=int)
@@ -6079,8 +6101,8 @@ def main() -> int:
                      f"RAM: {ram:.0f} GB - the smallest model (the Coder) needs about {need} GB",
                      "PolyStrata keeps all of the model's experts in RAM (23-50 GB, whatever the GPU) and the GPU holds a "
                      "copy of the most-used ones: it needs 32 GB of RAM or more (48 GB for the full model); --model "
-                     "NAME --yes installs one anyway. Qwen3.6, Ornith 1.5 and Gemma 4 want less: --family qwen36, "
-                     "ornith or gemma4")
+                     "NAME --yes installs one anyway. Qwen3.6, Ornith 1.5, Gemma 4 and LFM2.5 want less: --family "
+                     "qwen36, ornith, gemma4 or lfm2")
         warn(f"going on with {ram:.0f} GB of RAM, as you chose")
     ram_msg = (f"RAM: {ram:.0f} GB" if ram >= need - 4 or own_ram else f"RAM: {ram:.0f} GB (less than the {need} GB the smallest model needs)"
                + ("; the GPU's VRAM makes up for it (the low-RAM mode)" if ram < need - 4 and low_ok else ""))

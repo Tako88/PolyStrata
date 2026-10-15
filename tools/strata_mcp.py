@@ -126,6 +126,14 @@ FALLBACK_FAMILIES = {
                                        "download_gb": 13.6, "ram_gb": 18, "arena_gb": 11.5},
                         "UD-Q4_K_XL": {"about": "4-bit experts, 5- and 6-bit where they write",
                                        "download_gb": 22.7, "ram_gb": 27, "arena_gb": 20.0}}},
+    "lfm2": {"title": "LFM2.5-24B-A2B", "about": "on the strata-poly engine too; a 15 GB file, ~19 GB of RAM "
+                                                     "beside an 8 GB card; a larger size too", "tag": "lfm2-",
+             "engine": "poly", "vision": False, "experimental": True,
+             "models": {"Q4_K_M": {"about": "4-bit K-quant experts, 6-bit where they write; the better fit for a "
+                                             "16 GB card",
+                                   "download_gb": 14.5, "ram_gb": 19, "arena_gb": 13.816},
+                        "Q6_K": {"about": "6-bit K-quant experts: better quality, more RAM",
+                                 "download_gb": 19.7, "ram_gb": 24, "arena_gb": 18.648}}},
 }
 FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]
 BENCH_PROMPT = ("Write a short story (about 300 words) about a lighthouse keeper who finds a message in a bottle. "
@@ -736,7 +744,7 @@ class Strata:
             return {"family": None, "model": None, "why": f"{ram:.0f} GB of RAM: Qwen3.8-Flash-Next needs 32 GB or "
                                                           "more (its smallest, the Coder, keeps ~23 GB of experts in "
                                                           "RAM); the 11-24 GB models (family qwen36, ornith, "
-                                                          "gemma4 or tiel: experimental) want 15-28 GB"}
+                                                          "gemma4, tiel or lfm2: experimental) want 15-28 GB"}
         ctx = 32768 if vram < 14 else 65536 if vram < 20 else 131072
         if vram < 11:
             notes.append("less than 12 GB of VRAM: it runs, but slowly (most experts stay on the CPU)")
@@ -1005,7 +1013,8 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
          "description": "The models and sizes PolyStrata's setup offers (families: qwen = Qwen3.8-Flash-Next, swift = "
                         "Swift 1.5, coder = the Coder, unsloth = Unsloth's ~4-bit, glm = GLM 5.3 Flash, another "
                         "model with its own engine, qwen36 = Qwen3.6-35B-A3B, ornith = Ornith 1.5, gemma4 = "
-                        "Gemma 4 26B-A4B and tiel = Tiel Coder 35B-A3B, 11-24 GB models on that engine), with "
+                        "Gemma 4 26B-A4B, tiel = Tiel Coder 35B-A3B and lfm2 = LFM2.5-24B-A2B, 11-24 GB models on "
+                        "that engine), with "
                         "download size, RAM needed, "
                         "whether each fits this PC, which are installed, the context lengths, and the recommendation. "
                         "Read-only.",
@@ -1027,7 +1036,8 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                        "experimental), part of the experts read from the SSD, glm = GLM 5.3 "
                                        "Flash (another model: Linux, one NVIDIA card, 64-128 GB of RAM, a 79 or "
                                        "114 GB download, no images), qwen36 = Qwen3.6-35B-A3B, ornith = Ornith "
-                                       "1.5, gemma4 = Gemma 4 26B-A4B, tiel = Tiel Coder 35B-A3B (GLM's engine: "
+                                       "1.5, gemma4 = Gemma 4 26B-A4B, tiel = Tiel Coder 35B-A3B and lfm2 = "
+                                       "LFM2.5-24B-A2B (GLM's engine: "
                                        "one NVIDIA card, an 11-24 GB download, 15-28 GB of RAM beside an 8 GB "
                                        "card by setup's estimate; images with vision)"},
              "model": {"type": "string", "enum": list(dict.fromkeys(
