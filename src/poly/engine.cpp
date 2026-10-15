@@ -952,7 +952,8 @@ const Shards& Engine::home(const TensorInfo& t) const {
 // A tensor to VRAM.  It goes as the file has it when the kernels compute with that type.  Otherwise it is
 // converted on the way: to F32 where a kernel reads floats, to BF16 for a matrix.  `fix` is applied to every
 // value, which also takes the float path.  While dense_ is null the call only adds up the arena (load() runs the
-// model's tensors through twice).
+// model's tensors through twice).  NVFP4 (40) is kept as read since native_mmvq_supported() takes it; the
+// per-tensor scale the file keeps beside it is the architecture's to read into Dev::scale, and lin() applies it.
 Dev Engine::upload(const TensorInfo* t, const std::string& name, int64_t n_in, int64_t n_out, Want want,
                    float (*fix)(float)) {
     if (!t) throw std::runtime_error("the GGUF has no tensor " + name);
@@ -1931,26 +1932,31 @@ void Engine::lin(const Dev& w, const float* x, float* y, int n, const void* xq, 
                 bf16_to_f32((const uint16_t*) w.p, wf_, count, st_);
                 wf = wf_;
             }
-            return gemm_f32(blas_, wf, x, y, w.n_in, w.n_out, per, n);
+            gemm_f32(blas_, wf, x, y, w.n_in, w.n_out, per, n);
+        } else if (w.type == kTypeF32) {
+            gemv_f32(fp(w), x, y, w.n_in, w.n_out, per, n, st_);
+        } else {
+            gemv_bf16((const uint16_t*) w.p, x, y, w.n_in, w.n_out, per, n, st_);
         }
-        if (w.type == kTypeF32) return gemv_f32(fp(w), x, y, w.n_in, w.n_out, per, n, st_);
-        return gemv_bf16((const uint16_t*) w.p, x, y, w.n_in, w.n_out, per, n, st_);
-    }
-    // a prompt batch: llama.cpp's matrix-matrix kernels read the weights once for all the tokens
-    if (mmq_ && n >= kStageRows && Mmq::fits((int) w.type, w.n_out, w.n_in)) {
+    } else if (mmq_ && n >= kStageRows && Mmq::fits((int) w.type, w.n_out, w.n_in)) {
+        // a prompt batch: llama.cpp's matrix-matrix kernels read the weights once for all the tokens
         Mmq::quantize(x, nullptr, mqx_, (int) w.type, w.n_in, w.n_in, n, st_);
-        return mmq_->mul(w.p, (int) w.type, w.n_out, w.n_in, 0, 1, mqx_, nullptr, nullptr, n, n, y, w.n_out, st_);
+        mmq_->mul(w.p, (int) w.type, w.n_out, w.n_in, 0, 1, mqx_, nullptr, nullptr, n, n, y, w.n_out, st_);
+    } else {
+        if (!xq) {
+            // the tokens' blocks are back to back, so they quantize as one long vector
+            kernels::native_quantize_q8_1(x, q8_, w.n_in * n, 1, st_);
+            xq = q8_;
+        }
+        // a launch takes up to 8 tokens, and each comes out as it would alone
+        const size_t token = kernels::native_q8_1_bytes(w.n_in);
+        for (int at = 0; at < n; at += 8)
+            kernels::native_mmvq((int) w.type, w.p, (const uint8_t*) xq + (size_t) at * token,
+                                 y + (size_t) at * w.n_out, w.n_in, w.n_out, std::min(8, n - at), st_);
     }
-    if (!xq) {
-        // the tokens' blocks are back to back, so they quantize as one long vector
-        kernels::native_quantize_q8_1(x, q8_, w.n_in * n, 1, st_);
-        xq = q8_;
-    }
-    // a launch takes up to 8 tokens, and each comes out as it would alone
-    const size_t token = kernels::native_q8_1_bytes(w.n_in);
-    for (int at = 0; at < n; at += 8)
-        kernels::native_mmvq((int) w.type, w.p, (const uint8_t*) xq + (size_t) at * token,
-                             y + (size_t) at * w.n_out, w.n_in, w.n_out, std::min(8, n - at), st_);
+    // The file's own multiplier: the reference applies it to the product (`res = ggml_mul(res, w_s)`,
+    // ref/src/llama-graph.cpp:1620-1632), so it multiplies here too, on every path, once.
+    if (w.scale != 1.f) axpy(y, w.scale, y, (size_t) n * w.n_out, false, st_);
 }
 
 void Engine::router_scores(const Layer& L, int n) { lin(L.gate_inp, xn_, rl_, n, xq_); }

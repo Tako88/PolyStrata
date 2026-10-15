@@ -102,6 +102,7 @@ struct Dev {
     void* p = nullptr;
     uint32_t type = 0;
     int n_in = 0, n_out = 0;
+    float scale = 1.f;   ///< a per-tensor multiplier the file keeps beside the tensor (NVFP4's .scale; 1 otherwise)
 };
 
 /// An ungated layer's experts have no gate to multiply by, so they must use ReLU² (act 2); a layer with a gate
