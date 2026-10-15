@@ -1801,6 +1801,39 @@ void conv4_silu(const float* x, float* state, const float* w, float* out, int ch
                                                                   snap ? snaps : 0u);
 }
 
+// LFM2's short convolution, a depthwise causal convolution of `taps` taps, with no activation.  A thread is a
+// channel and walks the tokens; the state rotates in memory, so no tap count has to fit a register set.  The
+// weights are llama.cpp's ggml_ssm_conv layout: w[ch*taps + k], k = 0 the oldest input and k = taps - 1 the
+// token itself (ggml/src/ggml-cpu/ops.cpp:9570-9622, src/models/lfm2.cpp:159-232).
+__global__ void shortconv_kernel(const float* __restrict__ bcx, float* __restrict__ state,
+                                 const float* __restrict__ w, float* __restrict__ out, int channels, int taps,
+                                 int rows, float* __restrict__ snap, size_t stride, unsigned snaps) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) return;
+    const float* wc = w + size_t(c) * taps;
+    float* st = state + size_t(c) * (taps - 1);   // the past b*x values, oldest first
+    const size_t row_stride = size_t(3) * channels, c_at = size_t(c) + channels, x_at = c_at + channels;
+    for (int row = 0; row < rows; ++row) {
+        const size_t at = size_t(row) * row_stride;
+        const float cur = bcx[at + c] * bcx[at + x_at];   // the state keeps b*x, not x
+        float y = cur * wc[taps - 1];
+        for (int k = 0; k + 1 < taps; ++k) y += st[size_t(k)] * wc[k];
+        out[size_t(row) * channels + size_t(c)] = y * bcx[at + c_at];   // c multiplies the convolution's output
+        for (int k = 0; k + 2 < taps; ++k) st[size_t(k)] = st[size_t(k) + 1];
+        st[taps - 2] = cur;
+        if (float* m = snap_of(snap, stride, snaps, row)) {
+            m += size_t(c) * (taps - 1);
+            for (int k = 0; k + 1 < taps; ++k) m[k] = st[size_t(k)];
+        }
+    }
+}
+
+void shortconv(const float* bcx, float* state, const float* w, float* out, int channels, int taps, int rows,
+               void* stream, float* snap, size_t stride, unsigned snaps) {
+    shortconv_kernel<<<grid(channels, 256), 256, 0, cs(stream)>>>(bcx, state, w, out, channels, taps, rows, snap,
+                                                                  stride, snap ? snaps : 0u);
+}
+
 void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const float* a, float* s, const float* z,
               const float* o_norm, float* out, int dim, int n_head, int k_heads, int rows, float norm_eps, void* stream,
               float* snap, size_t stride, unsigned snaps) {

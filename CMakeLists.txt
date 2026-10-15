@@ -1661,7 +1661,7 @@ if(STRATA_ENABLE_CUDA AND STRATA_NATIVE_EXPERTS AND NOT STRATA_ENABLE_HIP AND NO
   target_link_libraries(strata_poly_mmq PUBLIC ggml-base ${_strata_gpu_runtime_target})
 
   add_executable(strata-poly src/poly/main.cpp src/poly/engine.cpp src/poly/glm5next.cpp src/poly/qwen35.cpp
-                            src/poly/gemma4.cpp src/poly/cpu_experts.cpp src/poly/kernels.cu
+                            src/poly/gemma4.cpp src/poly/lfm2moe.cpp src/poly/cpu_experts.cpp src/poly/kernels.cu
                             src/core/conversation_memory.cpp)
   target_include_directories(strata-poly PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
   # the driver's virtual memory calls: the attention caches grow with the conversation
@@ -1726,7 +1726,7 @@ if(STRATA_POLY_HIP)
   target_compile_definitions(strata_poly_mmq PRIVATE GGML_USE_HIP=1 STRATA_POLY_MMQ_HIP=1)
   target_link_libraries(strata_poly_mmq PUBLIC ggml-base hip::host roc::hipblas)   # NOT strata_hip_runtime: see Risks
   add_executable(strata-poly src/poly/main.cpp src/poly/engine.cpp src/poly/glm5next.cpp src/poly/qwen35.cpp
-                            src/poly/gemma4.cpp src/poly/cpu_experts.cpp src/poly/kernels.cu
+                            src/poly/gemma4.cpp src/poly/lfm2moe.cpp src/poly/cpu_experts.cpp src/poly/kernels.cu
                             src/core/conversation_memory.cpp)
   target_include_directories(strata-poly PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
   target_link_libraries(strata-poly PRIVATE strata_poly_mmq strata_kernels strata_spec ggml-cpu ggml-base

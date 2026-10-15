@@ -4,6 +4,7 @@
 
 #include "gemma4.hpp"
 #include "glm5next.hpp"
+#include "lfm2moe.hpp"
 #include "mmq.hpp"
 #include "qwen35.hpp"
 #include "runtime.hpp"
@@ -915,6 +916,7 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
         if (name == "glm5-next" || name == "glm5next") return std::make_unique<Glm5Next>();   // Unsloth: no hyphen
         if (name == "qwen35moe") return std::make_unique<Qwen35>();
         if (name == "gemma4") return std::make_unique<Gemma4>();
+        if (name == "lfm2moe") return std::make_unique<Lfm2Moe>();
         throw std::runtime_error(o.model + " is a '" + name + "' model, which this engine does not run");
     };
     int cards = 1;
@@ -1717,7 +1719,14 @@ void Engine::load(const Options& o) {
         for (int il = 0; il < n_all; ++il)
             if (runs(il)) load_layer(il);
         if (hi_ == n_layer_) {
-            out_norm_ = upload(gg_->find("output_norm.weight"), "output_norm.weight", n_embd_, 1, kF32);
+            // LFM2.5's converter writes the output norm as token_embd_norm.weight (out_norm_alias()); the bare
+            // name is still looked up first, so every other architecture is unchanged
+            const TensorInfo* on = gg_->find("output_norm.weight");
+            if (!on)
+                if (const Names* n = out_norm_alias())
+                    for (const char* other : n->other)
+                        if (other && (on = gg_->find(other))) break;
+            out_norm_ = upload(on, "output_norm.weight", n_embd_, 1, kF32);
             // a file without an output matrix ties the output to the token table
             const TensorInfo* head = gg_->find("output.weight");
             output_ = upload(head ? head : gg_->find("token_embd.weight"), "output.weight", n_embd_, n_vocab_,

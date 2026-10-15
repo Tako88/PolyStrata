@@ -5,8 +5,8 @@
 // from the mapped file while the GPU does its share.
 //
 // Engine is what every architecture shares.  An architecture is a class derived from it (glm5next.hpp, qwen35.hpp,
-// gemma4.hpp) that reads the model's shape, loads a layer's weights and composes a layer from the kernels;
-// Engine::open() picks it by the file's general.architecture.
+// gemma4.hpp, lfm2moe.hpp) that reads the model's shape, loads a layer's weights and composes a layer from the
+// kernels; Engine::open() picks it by the file's general.architecture.
 //
 // On several cards (Options::layer_split) each card has an engine of its own for a run of the layers, with their
 // weights, caches, state and expert cache, and the last one has the output and the draft block.  The first one is
@@ -378,6 +378,10 @@ protected:
     /// The other names of a tensor or a metadata key in the files of this architecture, or null.
     virtual const Names* tensor_alias(const char* name) const { (void) name; return nullptr; }
     virtual const Names* meta_alias(const char* key) const { (void) key; return nullptr; }
+    /// The other names of the model's output norm, or null.  It is loaded by the bare name `output_norm.weight`
+    /// and never goes through tensor_alias() (that seam is layer-scoped): LFM2.5's converter writes
+    /// `token_embd_norm.weight`.  With the default null the lookup order and the error message are unchanged.
+    virtual const Names* out_norm_alias() const { (void) 0; return nullptr; }
 
     // ---- what it builds on ----
     /// Whether layer il is this engine's: one of [lo_, hi_), or the draft block on the card that ends the model.

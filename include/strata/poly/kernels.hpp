@@ -192,6 +192,16 @@ void mul_sigmoid(float* acc, const float* g, int n, int rows, int g_stride, bool
 /// the tokens' order, `stride` floats apart.
 void conv4_silu(const float* x, float* state, const float* w, float* out, int channels, int rows, void* stream,
                 float* snap = nullptr, size_t stride = 0, unsigned snaps = 0);
+/// LFM2's short convolution, no activation: a depthwise causal convolution of `taps` taps over each of
+/// `channels` channels.  bcx holds 3 * channels values a token: the in_proj's output, split b | c | x, each
+/// `channels` long.  The convolution runs over b*x per channel; the weights are w[taps, channels], per channel
+/// contiguous, the tap order of llama.cpp's ggml_ssm_conv (src/models/lfm2.cpp + ggml/src/ggml-cpu/ops.cpp):
+/// w[ch*taps + 0] is the oldest input and w[ch*taps + taps - 1] the token itself.  The result is multiplied by c
+/// and written to out (`channels` values a token).  state: taps - 1 past b*x values a channel, oldest first,
+/// advanced here by `rows` tokens.  With snap, the state after some of the call's tokens is also written there,
+/// as conv4_silu()'s, `stride` floats apart and a bit a token in `snaps`.
+void shortconv(const float* bcx, float* state, const float* w, float* out, int channels, int taps, int rows,
+               void* stream, float* snap = nullptr, size_t stride = 0, unsigned snaps = 0);
 /// The delta-rule step of every value head and its gated output, token after token: ggml's gated_delta_net op
 /// with one decay a head.  qkv: a token's conv outputs, the k_heads key heads' q, their k, then the n_head value
 /// heads' v, dim values each; value head h reads key head h % k_heads.  alpha and beta: n_head a token, as their
