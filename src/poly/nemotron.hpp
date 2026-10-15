@@ -33,6 +33,8 @@ protected:
     void assign_scratch() override;
     int widest() const override;
     int streams() const override { return 1; }
+    bool snaps_spread() const override { return true; }
+    int head_key(int il, int n) const override;
     void layer_head(Layer& L, int il, int n) override;
     void layer_tail(Layer& L, int il, int n) override;
     void output_rows(int first, int rows, float* h) override;
@@ -59,6 +61,9 @@ private:
         std::vector<float> probs_b;
         Dev probs_b_dev;
     };
+
+    /// The Mamba-2 block's forward: the projection, the convolution, the scan and the grouped norm.
+    void mamba(Block& B, int il, int n);
 
     std::vector<Block> blocks_;      ///< one a layer of layers_, plus the draft block (there is none here)
     std::vector<uint8_t> kind_;      ///< a layer's kind: 0 Mamba-2, 1 attention, 2 MoE

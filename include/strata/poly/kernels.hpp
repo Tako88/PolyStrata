@@ -223,6 +223,36 @@ void conv4_silu(const float* x, float* state, const float* w, float* out, int ch
 /// first, advanced here by `rows` tokens.  snap, stride, snaps: as conv4_silu's.
 void shortconv(const float* bcx, float* state, const float* w, float* out, int channels, int rows, void* stream,
                float* snap = nullptr, size_t stride = 0, unsigned snaps = 0);
+/// A Mamba-2 block's depthwise convolution over the x|B|C slice of a token, four taps, then its bias and SiLU
+/// (nemotron_h_moe).  x: the slice's `channels` values a token, `x_row` floats apart.  out: `channels` values a
+/// token, back to back.  state: 3 past inputs a channel, oldest first, advanced here by `rows` tokens.  w:
+/// (4, channels), tap-major a channel: out[ch] = SiLU(sum_k window[k,ch] * w[k + ch*4] + bias[ch]) with
+/// window[0..2] the state and window[3+] the tokens' x.  That is the reference's ggml_ssm_conv (the tap order from
+/// third_party/llama.cpp/ggml/src/ggml-cpu/ops.cpp's sumf) and, after it, + bias and ggml_silu
+/// (ref/src/models/mamba-base.cpp:210-238).  snap, stride, snaps: as conv4_silu's.
+void mamba_conv(const float* x, int x_row, float* state, const float* w, const float* bias, float* out,
+                int channels, int rows, void* stream, float* snap = nullptr, size_t stride = 0,
+                unsigned snaps = 0);
+/// The selective scan of a Mamba-2 block, one thread a (head, dim) pair walking the rows.  x, B and C are the
+/// SiLU'd conv output's slice of a token: every row is dim*n_head + 2*d_state*n_group floats, x's dim*n_head
+/// first, then B's d_state*n_group and C's, so x = the row, B = the row + dim*n_head, C = B + d_state*n_group.
+/// dt: n_head a row, compact (the block's caller adds ssm_dt.bias first).  a and d: n_head.  state:
+/// {d_state, dim, n_head} with d_state fastest, updated.  y: dim, n_head a token.  Per row and head h (g =
+/// h / (n_head / n_group)):
+///   dt_sp = softplus(dt[h]); dA = expf(dt_sp * a[h]); x_dt = x[h*dim+i] * dt_sp
+///   s[j] = s[j] * dA + B[g*d_state + j] * x_dt;  y[h*dim+i] = sum_j s[j] * C[g*d_state + j] + d[h] * x[h*dim+i]
+/// with softplus(x) = x > 20 ? x : logf(1 + expf(x)).  That is the reference's recurrence
+/// (third_party/llama.cpp/ggml/src/ggml-cpu/ops.cpp:9831-9870) with its post-scan y += x*ssm_d folded in
+/// (ref/src/models/mamba-base.cpp:281-287).  snap, stride, snaps: as conv4_silu's.
+void mamba_scan(const float* x, const float* B, const float* C, const float* dt, const float* a, const float* d,
+                float* state, float* y, int dim, int n_head, int d_state, int n_group, int rows, void* stream,
+                float* snap = nullptr, size_t stride = 0, unsigned snaps = 0);
+/// A Mamba-2 block's post-scan: y = silu(z) * y, with z's `n * n_group` values `z_row` floats into the token's
+/// row of the block's projection, then the grouped RMS norm of every group's n values with w's group-th n (the
+/// reference's ggml_swiglu_split then reshape to {d_inner/n_group, n_group} and build_norm,
+/// ref/src/models/mamba-base.cpp:288-297).  y: n * n_group values a token, written in place.
+void mamba_norm(float* y, const float* z, int z_row, const float* w, int n, int n_group, int rows, float eps,
+                void* stream);
 /// The delta-rule step of every value head and its gated output, token after token: ggml's gated_delta_net op
 /// with one decay a head.  qkv: a token's conv outputs, the k_heads key heads' q, their k, then the n_head value
 /// heads' v, dim values each; value head h reads key head h % k_heads.  alpha and beta: n_head a token, as their

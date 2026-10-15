@@ -23,6 +23,7 @@
 #include <bit>
 #include <cctype>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1958,8 +1959,19 @@ void Engine::lin(const Dev& w, const float* x, float* y, int n, const void* xq, 
                                  y + (size_t) at * w.n_out, w.n_in, w.n_out, std::min(8, n - at), st_);
     }
     // The file's own multiplier: the reference applies it to the product (`res = ggml_mul(res, w_s)`,
-    // ref/src/llama-graph.cpp:1620-1632), so it multiplies here too, on every path, once.
-    if (w.scale != 1.f) axpy(y, w.scale, y, (size_t) n * w.n_out, false, st_);
+    // ref/src/llama-graph.cpp:1620-1632), so it multiplies here too, on every path, once.  The count is
+    // n * w.n_out floats, which an NVFP4 layer's 18560-wide ssm_in passes INT_MAX on a very long prompt batch
+    // (axpy takes an int), so it goes in int-sized chunks (host note 6).
+    if (w.scale != 1.f) {
+        size_t left = (size_t) n * (size_t) w.n_out;
+        float* at = y;
+        while (left) {
+            const int chunk = (int) std::min<size_t>(left, (size_t) INT_MAX);
+            axpy(at, w.scale, at, chunk, false, st_);
+            at += chunk;
+            left -= (size_t) chunk;
+        }
+    }
 }
 
 void Engine::router_scores(const Layer& L, int n) { lin(L.gate_inp, xn_, rl_, n, xq_); }

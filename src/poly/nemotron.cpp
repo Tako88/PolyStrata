@@ -1,7 +1,7 @@
 // src/poly/nemotron.cpp - the layers of NVIDIA-Nemotron-3.5-Bolt-74B-A9B (llama.cpp architecture
 // "nemotron_h_moe").  The reference for the geometry and the load is llama.cpp's nemotron-h loader and its
-// mamba-base graph (ref/src/models/mamba-base.cpp, ref-nemotron-h.cpp); the Mamba-2/attention/MoE forward is
-// M4/M5 of the plan and is not here yet.
+// mamba-base graph (ref/src/models/mamba-base.cpp, ref-nemotron-h.cpp); the Mamba-2 block's forward is here
+// (M4), the attention and the latent MoE are M5.
 #include "nemotron.hpp"
 
 #include "runtime.hpp"
@@ -10,16 +10,41 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 namespace strata::poly {
 namespace {
 
 constexpr size_t kScoreFloats = size_t(16) << 20;  // the attention's scores of the tokens it takes at a time
-// The forward pass is the next milestone's: this class loads and allocates, and anything that multiplies a
-// token refuses by name rather than answering with something wrong.
-const char* const kForward = "nemotron_h_moe: the forward pass is not built yet (milestones M4/M5)";
+// The Mamba-2 blocks run (M4); this block's forward, the output head and the routed experts are M5.
+const char* const kForward = "nemotron_h_moe: this block's forward is not built yet (milestone M5)";
+
+// M4's independent check of the decay path.  `--dump-layers` forces window = rows = 1, so Engine::dbg() ever sees
+// only a call's first row, and pos = 1 of a 2-token call (where the scan's `s[j] = s0[j] * dA + B[j] * x_dt` has
+// read `dA = expf(dt_sp * a[h])`) is never printed.  STRATA_NEMOTRON_DUMP=1 prints every row here, in dbg()'s own
+// format and at pos + row, so a 2-token call can be held against the reference's mamba2_y_add_d-0 {64,128,2,1}.
+// Arch-local: with the variable unset this is a no-op and no other architecture's dump output changes.
+void dump_rows(int64_t pos, const char* name, int il, const float* dev, int width, int rows, cudaStream_t st) {
+    const char* e = std::getenv("STRATA_NEMOTRON_DUMP");
+    if (!e || !*e || *e == '0') return;
+    std::vector<float> h((size_t) width * rows);
+    ck(cudaStreamSynchronize(st), "dump");
+    ck(cudaMemcpy(h.data(), dev, h.size() * sizeof(float), cudaMemcpyDeviceToHost), "dump");
+    for (int t = 0; t < rows; ++t) {
+        const float* r = h.data() + (size_t) t * width;
+        double sum = 0, abs = 0;
+        for (int i = 0; i < width; ++i) {
+            sum += r[i];
+            abs += std::fabs(r[i]);
+        }
+        std::fprintf(stderr, "dump pos=%lld blk=%d %-8s n=%d sum=%.6f abs=%.6f first=%.6f %.6f %.6f\n",
+                     (long long) (pos + t), il, name, width, sum, abs, r[0], r[1], r[2]);
+    }
+}
 
 }  // namespace
 
@@ -118,6 +143,13 @@ void Nemotron::load_geometry() {
             if (!gate || ssm || q)
                 throw std::runtime_error(blk(il, "") + " is a MoE layer by its metadata, but its tensors say " + say);
         }
+        // Host note 4: on a MoE layer the reference takes the expert width from expert_feed_forward_length and
+        // falls back to feed_forward_length / expert_used_count when that key is absent (ref-nemotron-h.cpp:117-119).
+        // This engine refuses to guess which of the two a file means: both numbers are named.
+        if (!recr && !attn && ff_exp != ff)
+            throw std::runtime_error(blk(il, "expert_feed_forward_length") + " is " + std::to_string(ff_exp) +
+                                     " and " + blk(il, "feed_forward_length") + " is " + std::to_string(ff) +
+                                     ": the experts' width is the one the two agree on");
     }
     need(n_kv_ > 0, "no attention layer");
 
@@ -327,8 +359,51 @@ void Nemotron::load_card_rows(const uint8_t* src, int64_t from, int64_t count, i
     }
 }
 
-// ---- the forward pass, which is M4/M5 of the plan ----
-void Nemotron::layer_head(Layer&, int, int) { throw std::runtime_error(kForward); }
+// ---- the forward pass: the Mamba-2 block (M4); the attention, the latent MoE and the output head are M5 ----
+
+// The Mamba-2 block.  The projection splits into z, x|B|C and dt in that order (ref/src/models/mamba-base.cpp:
+// 185-208); the convolution takes four taps over x|B|C and its SiLU; the scan carries the state; and the
+// post-scan is silu(z)*y, the grouped RMS norm and ssm_out (with its own scale).
+void Nemotron::mamba(Block& B, int il, int n) {
+    const int ssm_dim = d_inner_ / n_ssm_head_;                  // the per-head width, derived (64)
+    const int dt_off = 2 * d_inner_ + 2 * n_group_ * d_state_;   // the dt slice of the projection
+    lin(B.ssm_in, xn_, proj_, n, xq_);                            // the file's scale multiplies (Dev::scale)
+    // dt is n_head a token in the reference's strided view; the scan takes it compact, with ssm_dt.bias added
+    // (ref/src/models/mamba-base.cpp:250).
+    ck(cudaMemcpy2DAsync(dt_, (size_t) n_ssm_head_ * sizeof(float), proj_ + dt_off,
+                         (size_t) d_in_proj_ * sizeof(float), (size_t) n_ssm_head_ * sizeof(float), (size_t) n,
+                         cudaMemcpyDeviceToDevice, cs(st_)),
+       "the Mamba-2 dt slice");
+    add_bias(fp(B.ssm_dt_b), dt_, n_ssm_head_, n, st_);
+    mamba_conv(proj_ + d_inner_, d_in_proj_, B.past, fp(B.ssm_conv), fp(B.ssm_conv_b), conv_, conv_dim_, n, st_,
+               snap_bits_ ? snap_at_ + (B.past - state_) : nullptr, rec_n_, snap_bits_);
+    mamba_scan(conv_, conv_ + d_inner_, conv_ + d_inner_ + (size_t) n_group_ * d_state_, dt_, fp(B.ssm_a),
+               fp(B.ssm_d), B.s, y_, ssm_dim, n_ssm_head_, d_state_, n_group_, n, st_,
+               snap_bits_ ? snap_at_ + (B.s - state_) : nullptr, rec_n_, snap_bits_);
+    dbg("mamba2_y_add_d", il, y_, d_inner_);   // the reference's cb after y += x*ssm_d (folded into the scan)
+    dump_rows(pos_, "mamba2_y_add_d", il, y_, d_inner_, n, cs(st_));   // every row, for the pos = 1 dA check
+    mamba_norm(y_, proj_, d_in_proj_, fp(B.ssm_norm), d_inner_ / n_group_, n_group_, n, rms_eps_, st_);
+    lin(B.ssm_out, y_, ao_, n);
+}
+
+// A layer from its input to its output (the MoE's router copy is M5).  Every block norm has this shape; only a
+// Mamba-2 block's sublayer exists yet.
+void Nemotron::layer_head(Layer& L, int il, int n) {
+    Block& B = blocks_[(size_t) il];
+    rms_norm(r_, fp(L.attn_norm), xn_, n_embd_, n, rms_eps_, st_);
+    kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
+    dbg("attn_in", il, xn_, n_embd_);
+    dump_rows(pos_, "attn_in", il, xn_, n_embd_, n, cs(st_));
+    if (!B.recr) throw std::runtime_error(kForward);
+    mamba(B, il, n);
+    dbg("attn", il, ao_, n_embd_);
+    dump_rows(pos_, "attn", il, ao_, n_embd_, n, cs(st_));
+    axpy(ao_, 1.f, r_, n * n_embd_, true, st_);
+}
+
+// An attention block's launches are sized by the rows they read; a Mamba-2 block's are the same for any size.
+int Nemotron::head_key(int il, int n) const { return blocks_[(size_t) il].attn ? room_key(n) : 0; }
+
 void Nemotron::layer_tail(Layer&, int, int) { throw std::runtime_error(kForward); }
 void Nemotron::output_rows(int, int, float*) { throw std::runtime_error(kForward); }
 void Nemotron::route(int, const float*, int32_t, int*, float*, float*) const { throw std::runtime_error(kForward); }

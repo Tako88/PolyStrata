@@ -2024,6 +2024,98 @@ __global__ void gdn_out_kernel(float* __restrict__ out, const float* __restrict_
     out[at] = o / sqrtf(os / float(dim) + norm_eps) * o_norm[threadIdx.x] * (gate * sigmoid(gate));
 }
 
+// ---- Mamba-2 (nemotron_h_moe): the depthwise convolution, the selective scan and the grouped norm ----
+
+// The four-tap causal convolution of a Mamba-2 block, its bias and its SiLU.  x: the x|B|C slice, `channels`
+// values a token, x_row floats apart.  A thread a channel walks the tokens (conv4_silu_kernel's shape).
+__global__ void mamba_conv_kernel(const float* __restrict__ x, int x_row, float* __restrict__ state,
+                                  const float* __restrict__ w, const float* __restrict__ bias,
+                                  float* __restrict__ out, int channels, int rows,
+                                  float* __restrict__ snap, size_t stride, unsigned snaps) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) return;
+    const float* wc = w + 4 * size_t(c);
+    float* st = state + size_t(c) * 3;
+    float s0 = st[0], s1 = st[1], s2 = st[2];
+    const float b = bias[c];
+    for (int row = 0; row < rows; ++row) {
+        const float v = x[size_t(row) * x_row + c];
+        const float y = s0 * wc[0] + s1 * wc[1] + s2 * wc[2] + v * wc[3] + b;
+        s0 = s1;
+        s1 = s2;
+        s2 = v;
+        out[size_t(row) * channels + c] = y * sigmoid(y);
+        if (float* m = snap_of(snap, stride, snaps, row)) {
+            m += size_t(c) * 3;
+            m[0] = s0;
+            m[1] = s1;
+            m[2] = s2;
+        }
+    }
+    st[0] = s0;
+    st[1] = s1;
+    st[2] = s2;
+}
+
+// ggml's softplus for dt (ggml-impl.h's ggml_compute_softplus_f32).
+__device__ __forceinline__ float softplus(float x) { return x > 20.0f ? x : logf(1.0f + expf(x)); }
+
+// The selective scan, one thread a (head, dim) pair walking the rows.  x/B/C share a row's x_row floats.
+__global__ void mamba_scan_kernel(const float* __restrict__ x, const float* __restrict__ B,
+                                  const float* __restrict__ C, const float* __restrict__ dt,
+                                  const float* __restrict__ a, const float* __restrict__ d,
+                                  float* __restrict__ state, float* __restrict__ y, int dim, int n_head,
+                                  int d_state, int n_group, int rows,
+                                  float* __restrict__ snap, size_t stride, unsigned snaps) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n_head * dim) return;
+    const int h = idx / dim, i1 = idx % dim;
+    const int x_row = dim * n_head + 2 * d_state * n_group;
+    const int g = h / (n_head / n_group);
+    float* s = state + size_t(h * dim + i1) * d_state;
+    for (int row = 0; row < rows; ++row) {
+        const float dt_sp = softplus(dt[row * n_head + h]);
+        const float dA = expf(dt_sp * a[h]);
+        const float* xr = x + size_t(row) * x_row;
+        const float* Br = B + size_t(row) * x_row + g * d_state;
+        const float* Cr = C + size_t(row) * x_row + g * d_state;
+        const float xv = xr[h * dim + i1];
+        const float x_dt = xv * dt_sp;
+        float sumf = 0.0f;
+        for (int j = 0; j < d_state; ++j) {
+            const float st = s[j] * dA + Br[j] * x_dt;
+            s[j] = st;
+            sumf += st * Cr[j];
+        }
+        y[size_t(row) * n_head * dim + h * dim + i1] = sumf + d[h] * xv;
+        if (float* m = snap_of(snap, stride, snaps, row)) {
+            m += size_t(h * dim + i1) * d_state;
+            for (int j = 0; j < d_state; ++j) m[j] = s[j];
+        }
+    }
+}
+
+// silu(z) * y and the grouped RMS norm, in place.  One block a token's group of n values; z is z_row apart a row.
+__global__ void mamba_norm_kernel(float* __restrict__ y, const float* __restrict__ z, int z_row,
+                                  const float* __restrict__ w, int n, int n_group, float eps) {
+    __shared__ float part[32];
+    const int g = blockIdx.x % n_group;
+    const size_t row = blockIdx.x / n_group;
+    float* yr = y + row * size_t(n) * n_group + size_t(g) * n;
+    const float* zr = z + row * size_t(z_row) + size_t(g) * n;
+    const float* wr = w + size_t(g) * n;
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        const float zz = zr[i];
+        const float v = zz * sigmoid(zz) * yr[i];
+        yr[i] = v;
+        ss += v * v;
+    }
+    ss = block_sum(ss, part);
+    const float scale = 1.0f / sqrtf(ss / float(n) + eps);
+    for (int i = threadIdx.x; i < n; i += blockDim.x) yr[i] = yr[i] * scale * wr[i];
+}
+
 inline cudaStream_t cs(void* stream) { return (cudaStream_t) stream; }
 inline int grid(size_t n, int block) { return int((n + block - 1) / block); }
 
@@ -2512,6 +2604,36 @@ void shortconv(const float* bcx, float* state, const float* w, float* out, int c
     }
     if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
         throw std::runtime_error(std::string("shortconv: ") + cudaGetErrorString(e));
+}
+
+void mamba_conv(const float* x, int x_row, float* state, const float* w, const float* bias, float* out,
+                int channels, int rows, void* stream, float* snap, size_t stride, unsigned snaps) {
+    if (rows <= 0) return;
+    mamba_conv_kernel<<<grid(channels, 256), 256, 0, cs(stream)>>>(x, x_row, state, w, bias, out, channels, rows,
+                                                                   snap, stride, snaps);
+    if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
+        throw std::runtime_error(std::string("mamba_conv: ") + cudaGetErrorString(e));
+}
+
+void mamba_scan(const float* x, const float* B, const float* C, const float* dt, const float* a, const float* d,
+                float* state, float* y, int dim, int n_head, int d_state, int n_group, int rows, void* stream,
+                float* snap, size_t stride, unsigned snaps) {
+    if (rows <= 0) return;
+    if (n_group < 1 || n_head % n_group)
+        throw std::invalid_argument("mamba_scan: the heads do not fall into groups");
+    mamba_scan_kernel<<<grid((size_t) n_head * dim, 256), 256, 0, cs(stream)>>>(x, B, C, dt, a, d, state, y, dim,
+        n_head, d_state, n_group, rows, snap, stride, snaps);
+    if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
+        throw std::runtime_error(std::string("mamba_scan: ") + cudaGetErrorString(e));
+}
+
+void mamba_norm(float* y, const float* z, int z_row, const float* w, int n, int n_group, int rows, float eps,
+                void* stream) {
+    if (rows <= 0 || n_group <= 0 || n <= 0) return;
+    mamba_norm_kernel<<<(unsigned) (size_t(rows) * n_group), sum_threads(n), 0, cs(stream)>>>(y, z, z_row, w, n,
+        n_group, eps);
+    if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
+        throw std::runtime_error(std::string("mamba_norm: ") + cudaGetErrorString(e));
 }
 
 void gdn_step(float* qkv, float* alpha, float* beta, const float* dt, const float* a, float* s, const float* z,
