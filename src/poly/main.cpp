@@ -267,6 +267,7 @@ public:
     }
 
     std::atomic<bool> stop{false};
+    std::atomic<bool> closed{false};   ///< stdin ended: the server is gone, so nothing still to run runs to its end
 
 private:
     void read() {
@@ -276,6 +277,12 @@ private:
             if (l == "STOP") stop.store(true);
             else push(l);
         }
+        // The server is gone (its end of the pipe closed).  An answer already being written is aborted like a
+        // STOP, and a request still in the queue is not run to its end either: the GPU and the RAM come back now,
+        // not when that answer would have finished.  Without this the engine held its VRAM until the answer was
+        // done, which with a long answer and a large --max-new is minutes.
+        closed.store(true);
+        stop.store(true);
         push("QUIT");
     }
     void push(std::string s) {
@@ -568,7 +575,7 @@ int serve(Session& ss) {
         const std::string line = lines.pop();
         if (line == "QUIT") break;
         if (line.empty()) continue;
-        lines.stop.store(false);   // a STOP that came between requests is stale
+        if (!lines.closed.load()) lines.stop.store(false);   // a STOP that came between requests is stale
         long long max_new = 0;
         Sampling s;
         std::vector<int32_t> ids;
