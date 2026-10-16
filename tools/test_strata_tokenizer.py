@@ -95,5 +95,25 @@ class ByteCache(unittest.TestCase):
             self.assertEqual(list(pool.map(decode, texts)), texts)
 
 
+class PixtralPre(unittest.TestCase):
+    """`pre = pixtral` (Nemotron-3.5-Bolt-74B-A9B) is llama.cpp's LLAMA_VOCAB_PRE_TYPE_LLAMA3 arm - the same
+    pattern and ignore_merges `lfm2` gets - so the ids are the reference's `/tokenize` ones (evidence.md, M7)."""
+    TOKENS = ["1", "2", "3", "4", "5", "12", "123", "45", "a", "b", "ab"]
+    MERGES = ["1 2", "12 3", "4 5"]
+
+    def pieces(self, pre, text):
+        tok = ST.Tokenizer(self.TOKENS, self.MERGES, pre=pre)
+        return [self.TOKENS[i] for i in tok.encode(text)]
+
+    def test_the_llama3_arm_is_selected(self):
+        self.assertIs(ST.PRE_PATTERNS["pixtral"], ST.GLM4_PATTERN)
+        self.assertIn("pixtral", ST.IGNORE_MERGES)
+
+    def test_digits_in_runs_of_three_and_whole_pieces_skip_the_merges(self):
+        self.assertEqual(self.pieces("pixtral", "12345"), ["123", "45"])
+        self.assertEqual(self.pieces("pixtral", "ab"), ["ab"])
+        self.assertEqual(self.pieces("qwen35", "12345"), ["1", "2", "3", "4", "5"])
+
+
 if __name__ == "__main__":
     unittest.main()

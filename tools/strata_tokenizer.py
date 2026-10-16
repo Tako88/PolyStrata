@@ -66,7 +66,7 @@ QWEN35_PATTERN = (
 # The `glm4` / `glm5` pre-tokenizer (GLM 5.3 Flash), from llama.cpp's LLAMA_VOCAB_PRE_TYPE_CHATGLM4: no `\p{M}`,
 # and digits in runs of up to three.  llama.cpp also sets ignore_merges for these two names: a piece that is a
 # token as a whole is that token, without running the merges.  LLAMA_VOCAB_PRE_TYPE_LLAMA3, which llama.cpp gives
-# `lfm2` (LFM2.5-24B-A2B), is the same pattern with the same ignore_merges.
+# `lfm2` (LFM2.5-24B-A2B) and `pixtral` (Nemotron-3.5-Bolt-74B-A9B), is the same pattern with the same ignore_merges.
 GLM4_PATTERN = (
     r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])"
     r"|[^\r\n\p{L}\p{N}]?\p{L}+"
@@ -99,10 +99,15 @@ DEEPSEEK3_SEQUENCE = (
     r"|\s+",
 )
 
+# `pixtral` (Nemotron-3.5-Bolt-74B-A9B) selects the same LLAMA_VOCAB_PRE_TYPE_LLAMA3 arm as `lfm2` and takes its
+# pattern and ignore_merges with it: llama.cpp's arm at ref/src/llama-vocab.cpp:2301-2309 lists llama3, llama-v3,
+# llama-bpe, falcon3, falcon-h1, pixtral, midm-2.0, lfm2 and jina-v5-nano together and sets `ignore_merges = true`
+# for all of them; the pattern itself is the LLAMA3 case at ref/src/llama-vocab.cpp:284-291.  `pre_pattern_source`
+# below records it by name so a C++ port never has to guess which case wrote the shipped pattern.
 PRE_PATTERNS = {"glm4": GLM4_PATTERN, "glm5": GLM4_PATTERN,   # every other name: QWEN35_PATTERN, as before
-                "gemma4": GEMMA4_PATTERN, "lfm2": GLM4_PATTERN}
+                "gemma4": GEMMA4_PATTERN, "lfm2": GLM4_PATTERN, "pixtral": GLM4_PATTERN}
 PRE_SEQUENCES = {"joyai-llm": DEEPSEEK3_SEQUENCE, "deepseek-v3": DEEPSEEK3_SEQUENCE}
-IGNORE_MERGES = ("glm4", "glm5", "lfm2")
+IGNORE_MERGES = ("glm4", "glm5", "lfm2", "pixtral")
 RAW = ("gemma4",)                      # vocabularies of UTF-8 pieces
 MODELS = {"gpt2": None, "gemma4": "gemma4"}   # tokenizer.ggml.model -> the pre-tokenizer it implies, if any
 
@@ -449,7 +454,10 @@ def extract(gguf_path, out_dir) -> dict:
         "pre_pattern_source": "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_GEMMA4)" if tk.raw
                               else "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_DEEPSEEK3_LLM)"
                               if tk.pre_sequence
-                              else "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_CHATGLM4)" if tk.ignore_merges
+                              else "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_CHATGLM4)"
+                              if tk.pre in ("glm4", "glm5")
+                              else "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_LLAMA3)"
+                              if tk.pre in ("lfm2", "pixtral")
                               else ".ref/llama.cpp src/llama-vocab.cpp L396 (LLAMA_VOCAB_PRE_TYPE_QWEN35)",
         "ignore_merges": tk.ignore_merges,
     }
