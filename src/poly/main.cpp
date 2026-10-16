@@ -783,6 +783,9 @@ void usage() {
                  "  --images FILE          with --tokens: the prompt's pictures, as strata-vision writes them\n"
                  "  --image-pad ID         the token whose runs in --tokens are the pictures' places, a token a row\n"
                  "  --dump-layers          print a checksum of every layer's stages to stderr\n"
+                 "  --time-stages          print where a read's per-token time went, in three parts (layer_head,\n"
+                 "                          the experts, layer_tail).  The marks are read after the read, so a\n"
+                 "                          timed run takes what it would have\n"
                  "  --top-probs N          with --tokens: print the N most likely ids of every step to stderr\n"
                  "  --follow ID,ID,...     with --tokens: write these tokens in place of the ones picked, for\n"
                  "                         --top-probs of the same answer under other settings\n"
@@ -854,6 +857,7 @@ int main(int argc, char** argv) {
         else if (a == "--conversation-cache-min-tokens") cache.o.park_min = std::atoll(val());
         else if (a == "--conversation-cache-min-free-mib") cache.min_free_mib = std::atoll(val());
         else if (a == "--dump-layers") o.dump = true;
+        else if (a == "--time-stages") o.time_stages = true;
         else if (a == "--images") images = val();
         else if (a == "--image-pad") image_pad = std::atoi(val());
         else if (a == "--top-probs") top_probs = std::atoi(val());

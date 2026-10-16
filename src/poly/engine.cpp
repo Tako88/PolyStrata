@@ -379,6 +379,7 @@ Engine::~Engine() {
     if (st_) cudaStreamSynchronize(cs(st_));
     workers_.reset();
     mmq_.reset();
+    for (void* e : stage_ev_) cudaEventDestroy((cudaEvent_t) e);
     for (void* p : dev_allocs_) cudaFree(p);
     for (Kv& k : kv_) vmm_free(k);
     vmm_free(arena_);
@@ -2791,10 +2792,50 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
     stats_.tokens += n;
 }
 
-// A layer for n tokens, as run() hands it to the card when nothing is replayed or printed.
+// --time-stages: a mark at the end of stage `bucket` of the layer being read.  Events are made as they are needed
+// (a read is layers x calls of them at most) and none of them is read until the read is behind.
+void Engine::stage_mark(int bucket) {
+    const size_t at = stage_at_.size();
+    if (at >= stage_ev_.size()) {
+        cudaEvent_t made = nullptr;
+        ck(cudaEventCreate(&made), "stage event");   // timing on: the others are cudaEventDisableTiming
+        stage_ev_.push_back((void*) made);
+    }
+    ck(cudaEventRecord((cudaEvent_t) stage_ev_[at], cs(st_)), "stage mark");
+    stage_at_.push_back(bucket);
+}
+
+// The read is behind: the marks are the stages' own times, the second one's back to the first.
+void Engine::stage_done(int64_t rows) {
+    if (stage_at_.size() < 2) {
+        stage_at_.clear();
+        return;
+    }
+    ck(cudaStreamSynchronize(cs(st_)), "stage marks");
+    for (size_t k = 1; k < stage_at_.size(); ++k) {
+        float ms = 0;
+        ck(cudaEventElapsedTime(&ms, (cudaEvent_t) stage_ev_[k - 1], (cudaEvent_t) stage_ev_[k]), "stage elapsed");
+        stage_ms_[stage_at_[k]] += (double) ms;
+    }
+    stage_at_.clear();
+    stage_rows_ += rows;
+    const double per = (double) std::max<int64_t>(stage_rows_, 1);
+    static const char* const name[kStageCount] = {"norm+between", "projection", "conv+scan/attend",
+                                                  "out projection", "experts", "block rest+tail"};
+    double total = 0;
+    for (double ms : stage_ms_) total += ms;
+    std::fprintf(stderr, "strata-poly: read stages, %.2f ms/token over %lld tokens:", total / per,
+                 (long long) stage_rows_);
+    for (int k = 0; k < kStageCount; ++k) std::fprintf(stderr, " %s %.2f,", name[k], stage_ms_[k] / per);
+    std::fprintf(stderr, "\n");
+}
+
+// A layer for n tokens, as run() hands it to the card when nothing is replayed or printed.  layer_head() marks the
+// stages inside the block itself; this marks what is the engine's: the experts, the tail, and the rest of a head.
 void Engine::layer(int il, int n) {
     Layer& L = layers_[(size_t) il];
     layer_head(L, il, n);
+    if (opt_.time_stages) stage_mark(kStageRest);
     if (!L.moe) return;
     if (batched(L, n)) {
         moe_rows(L, il, n);
@@ -2803,7 +2844,9 @@ void Engine::layer(int il, int n) {
         moe_shared(L, il, n);
         if (moe(L, il, n)) moe_add(n);
     }
+    if (opt_.time_stages) stage_mark(kStageExperts);
     layer_tail(L, il, n);
+    if (opt_.time_stages) stage_mark(kStageRest);
 }
 
 // A prompt's tokens in the calls eval() would get, max_rows() at a time.  With experts outside the cache, each
@@ -2888,6 +2931,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
 
     ck(cudaStreamSynchronize(cs(st_)), "read");
     if (n_swap_ > 0) follow(0);
+    if (opt_.time_stages) stage_mark(kStageNorm);   // this read's first: the segment after it is the first layer
     const size_t e_row = (size_t) n_embd_, r_row = (size_t) streams() * e_row, r_bytes = r_row * sizeof(float);
     const size_t part = (size_t) std::max(streams(), draft_ ? 3 : 1) * rows_ * e_row;   // a call's rows of r_
     const float scale = embed_scale();
@@ -3010,6 +3054,7 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
             if (m.state) m.state += card_state_bytes();
         if (!next_->read(tokens, n, on.data(), n_marks, asked)) return false;
     }
+    if (opt_.time_stages) stage_done(n);
     pos_ = pos0 + n;
     stats_.tokens += n;
     return true;

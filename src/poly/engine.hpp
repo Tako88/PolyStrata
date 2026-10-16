@@ -56,6 +56,9 @@ struct Options {
     std::string profile;          ///< expert use counts; orders the expert cache, and save_profile() adds to it
     bool gpu_experts = true;
     bool dump = false;            ///< print a checksum of every stage, for comparing against llama.cpp
+    bool time_stages = false;     ///< --time-stages: mark a read's stages on the stream and print where its
+                                  ///< per-token time went.  The marks are read once the read is behind, so a timed
+                                  ///< run takes what it would have taken.
     // A prompt batch.  More tokens a call and a larger staging buffer read a prompt faster, and both take VRAM
     // that the expert cache, and so decoding, does without.
     int prompt_batch = 1024;      ///< prompt tokens one eval() takes; the scratch is about 1.4 MiB of VRAM a token
@@ -518,6 +521,27 @@ protected:
     void* st_ = nullptr;   ///< the stream everything but the staging ahead runs on
     void* blas_ = nullptr; ///< cuBLAS on st_
     void* ev_ = nullptr;   ///< marks the router's copy to the host: ev_row_'s first, or a window's row's own
+    /// The stages --time-stages tells apart.  kStageNorm also holds whatever the caller did between two layers.
+    enum Stage {
+        kStageNorm = 0,   ///< a layer's attn_norm and the quantization of its input
+        kStageProj,       ///< ssm_in, a block's queries/keys/values, the latent down projection
+        kStageMid,        ///< the Mamba-2 conv and scan, or the attention itself (with the KV rows' store)
+        kStageOut,        ///< ssm_out, or the attention's output projection
+        kStageExperts,    ///< the routed and the shared experts
+        kStageRest,       ///< what a block leaves after its sublayer's projection, and layer_tail
+        kStageCount,
+    };
+    // --time-stages: where a read's per-token time goes.  A mark ends one of those stages of the layer being
+    // read: an event on the card's stream, whose time against the mark before it is that stage's own.  They are
+    // all read in stage_done() once the read is behind, so a timed read takes what it would have taken, and
+    // nothing is made or recorded at all unless the option is given.  layer_head(), mamba() and attn() mark the
+    // stages only they know.  Engine::layer() marks the experts, the tail and the rest.
+    std::vector<void*> stage_ev_;
+    std::vector<int> stage_at_;   ///< the bucket of the stage each mark from the second on ends
+    int64_t stage_rows_ = 0;
+    double stage_ms_[kStageCount] = {};
+    void stage_mark(int bucket);
+    void stage_done(int64_t rows);
     void* ev_row_[8] = {}; ///< one for each token a window can have
     std::vector<void*> dev_allocs_, host_allocs_;
     std::vector<void*> graphs_;   ///< every recorded graph, to destroy

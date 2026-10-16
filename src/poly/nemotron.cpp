@@ -379,6 +379,7 @@ void Nemotron::mamba(Block& B, int il, int n) {
     const int ssm_dim = d_inner_ / n_ssm_head_;                  // the per-head width, derived (64)
     const int dt_off = 2 * d_inner_ + 2 * n_group_ * d_state_;   // the dt slice of the projection
     lin(B.ssm_in, xn_, proj_, n, xq_);                            // the file's scale multiplies (Dev::scale)
+    if (opt_.time_stages) stage_mark(kStageProj);
     // dt is n_head a token in the reference's strided view; the scan takes it compact, with ssm_dt.bias added
     // (ref/src/models/mamba-base.cpp:250).
     ck(cudaMemcpy2DAsync(dt_, (size_t) n_ssm_head_ * sizeof(float), proj_ + dt_off,
@@ -391,10 +392,12 @@ void Nemotron::mamba(Block& B, int il, int n) {
     mamba_scan(conv_, conv_ + d_inner_, conv_ + d_inner_ + (size_t) n_group_ * d_state_, dt_, fp(B.ssm_a),
                fp(B.ssm_d), B.s, y_, ssm_dim, n_ssm_head_, d_state_, n_group_, n, st_,
                snap_bits_ ? snap_at_ + (B.s - state_) : nullptr, rec_n_, snap_bits_);
+    if (opt_.time_stages) stage_mark(kStageMid);
     dbg("mamba2_y_add_d", il, y_, d_inner_);   // the reference's cb after y += x*ssm_d (folded into the scan)
     dump_rows(pos_, "mamba2_y_add_d", il, y_, d_inner_, n, cs(st_));   // every row, for the pos = 1 dA check
     mamba_norm(y_, proj_, d_in_proj_, fp(B.ssm_norm), d_inner_ / n_group_, n_group_, n, rms_eps_, st_);
     lin(B.ssm_out, y_, ao_, n);
+    if (opt_.time_stages) stage_mark(kStageOut);
 }
 
 // The attention block.  Queries, keys and values are one projection each; the keys and values take their rows in
@@ -406,6 +409,7 @@ void Nemotron::attn(Block& B, int64_t pos, int n) {
     lin(B.wq, xn_, q_, n, xq_);
     lin(B.wk, xn_, k_, n, xq_);
     lin(B.wv, xn_, v_, n, xq_);
+    if (opt_.time_stages) stage_mark(kStageProj);
     if (at) {
         store_f16_at(k_, B.keys, n_kv_ * head_dim_, at, n, 0, st_);
         store_f16_at(v_, B.vals, n_kv_ * head_dim_, at, n, 0, st_);
@@ -421,7 +425,9 @@ void Nemotron::attn(Block& B, int64_t pos, int n) {
     else
         attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, head_dim_, n_head_, n_kv_, scale, st_, 0, 0, false,
                at, at ? room(n) : 0);
+    if (opt_.time_stages) stage_mark(kStageMid);
     lin(B.wo, att_, ao_, n);
+    if (opt_.time_stages) stage_mark(kStageOut);
 }
 
 // A layer from its input to its residual.  Every block has one attn_norm and the sublayer reads that normed input.
@@ -431,6 +437,7 @@ void Nemotron::layer_head(Layer& L, int il, int n) {
     Block& B = blocks_[(size_t) il];
     rms_norm(r_, fp(L.attn_norm), xn_, n_embd_, n, rms_eps_, st_);
     kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
+    if (opt_.time_stages) stage_mark(kStageNorm);
     dbg("attn_in", il, xn_, n_embd_);
     dump_rows(pos_, "attn_in", il, xn_, n_embd_, n, cs(st_));
     if (B.recr) {
@@ -442,6 +449,7 @@ void Nemotron::layer_head(Layer& L, int il, int n) {
         // lands in lat_acc_.  The plan's note 4: this loader refuses a file whose expert width key is absent, where
         // the reference falls back to n_ff/n_expert_used (ref-nemotron-h.cpp:117-119); this file has the array.
         lin(B.lat_down, xn_, lat_, n, xq_);
+        if (opt_.time_stages) stage_mark(kStageProj);
         kernels::native_quantize_q8_1(lat_, latq_, moe_latent_ * n, 1, st_);
         moe_in_ = lat_;
         moe_in_xq_ = latq_;
