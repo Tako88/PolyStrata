@@ -24,8 +24,9 @@ GLM 5.3 Flash (--family glm, docs/GLM.md) is a second model with an engine of it
 NVIDIA card.  Its setup asks for the context and the conversation cache and has no steps for a pack or images.  The
 model has one draft block for all its sizes: a size whose file leaves it out gets the block alone (~2.8 GB).
 
-That engine also runs Qwen3.6-35B-A3B (--family qwen36), Ornith 1.5 (--family ornith) and Gemma 4 26B-A4B (--family
-gemma4) from one GGUF each, 13 to 17 GB (docs/BACKENDS.md).  Their setup is GLM's, with nothing more to fetch.
+That engine also runs Qwen3.6-35B-A3B (--family qwen36), Ornith 1.5 (--family ornith), Gemma 4 26B-A4B (--family
+gemma4) and Nemotron-3.5-Bolt-74B-A9B (--family nemotron) from one GGUF each, 13 to 22 GB (docs/BACKENDS.md).
+Their setup is GLM's, with nothing more to fetch.
 
 Options: --family qwen|swift|..., --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
 (--rope-scale F; past the trained 262144 the setup adds yarn and the factor is the final context over 262144,
@@ -85,6 +86,7 @@ HF_REVISIONS = {
     "unsloth/DeepSeek-V4-Flash-0731-GGUF": "fbbb5b93fb787c21338159b0af3318bb3f4d9768",               # 2026-10-15
     "unsloth/LFM2.5-24B-A2B-GGUF": "faa77113e93335b63423e9e8d33395f86eaf8946",                        # 2026-10-15
     "LiquidAI/LFM2.5-24B-A2B-GGUF": "0912d33141f77e10705345a6732bfd83f0252fdc",                       # 2026-10-15
+    "unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF": "f56d370e3d3314a5458750f33129bee3627b5eba",        # 2026-10-15
 }
 
 
@@ -659,6 +661,24 @@ FAMILIES = {
                         (22749880160, "54f46c4ce544c225122b0f066c2336f10404be7bc53b0cc94d1dbbc5e826bdc1"),
                         "mmproj-BF16.gguf":
                         (902822016, "d9ce31026d1cb1f3f8d5152e2e2a014d9d2b302b6c93a7dc07bb0a0487f52837")}},
+    # Nemotron-3.5-Bolt-74B-A9B (llama.cpp's nemotron_h_moe): another architecture on strata-poly, a GGUF read in
+    # place with NVFP4 dense weights, 40 Mamba-2 blocks and a latent MoE.  "arena_gb" is its routed experts from the
+    # file; "vram_beside_gb" is what is not expert cache on the 16 GB card at 32K (16.30 GiB less the 9.7 GiB of
+    # experts the engine held, evidence.md M6 step 21b); "ram_gb" is poly_ram_need() for an 8 GB card.  No draft
+    # block, no images, no shipped expert profile: the engine starts one.
+    "nemotron": {"title": "Nemotron-3.5-Bolt-74B-A9B", "by": "NVIDIA; quantized by Unsloth",
+                 "about": "on the strata-poly engine: Linux, one NVIDIA or AMD card; a 22 GB file, ~26 GB of RAM "
+                          "beside an 8 GB card; no images",
+                 "hf": hf("unsloth/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-GGUF"),
+                 "file": "NVIDIA-Nemotron-3.5-Bolt-74B-A9B-IQ2_XXS.gguf", "shards": 1, "tag": "nemotron-",
+                 "name": "nemotron-3.5-bolt-74b-a9b", "engine": "poly", "vision": False, "experimental": True,
+                 "row_bytes": 4096,
+                 "models": {"IQ2_XXS": {"about": "2-bit i-quant experts (IQ2_XXS) with NVFP4 dense weights, the "
+                                                 "only size",
+                                        "download_gb": 22.0, "ram_gb": 26, "arena_gb": 17.51,
+                                        "vram_beside_gb": 6.2}},
+                 "sha256": {"NVIDIA-Nemotron-3.5-Bolt-74B-A9B-IQ2_XXS.gguf":
+                            (22018326528, "91d63363e782c8a3d5f4be42816eba8e0d42dd2530bd07a7d0d2dc440599af75")}},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # Qwen3.6-35B-A3B (GGUF architecture qwen35moe), Unsloth's GGUFs with the MTP block: a family with an engine path of its
@@ -6684,7 +6704,8 @@ def main() -> int:
                     help="qwen = Qwen3.8-Flash-Next, swift = Swift 1.5, glm = GLM 5.3 Flash (docs/GLM.md), deepseek = "
                          "DeepSeek V4 Flash, lfm25 = LFM2.5-24B-A2B, qwen36 = Qwen3.6-35B-A3B on strata-poly, ornith = "
                          "Ornith 1.5, gemma4 = Gemma 4 26B-A4B, tiel = Tiel "
-                         "Coder 35B-A3B (docs/BACKENDS.md), qwen36-strata = Qwen3.6-35B-A3B on the Strata project's "
+                         "Coder 35B-A3B, nemotron = Nemotron-3.5-Bolt-74B-A9B "
+                         "(docs/BACKENDS.md), qwen36-strata = Qwen3.6-35B-A3B on the Strata project's "
                          "own engine (UD-Q4_K_XL and up, 32 GB of RAM or more)")
     ap.add_argument("--model", choices=list(dict.fromkeys(
         [*MODELS, *(m for f in FAMILIES.values() for m in f.get("models", {})),
