@@ -2095,6 +2095,50 @@ __global__ void mamba_scan_kernel(const float* __restrict__ x, const float* __re
     }
 }
 
+// The selective scan again, one block a head, with the head's state - dim x d_state floats, 32 KB at this model's
+// dim 64 and d_state 128 - in shared memory for the whole walk instead of read and written through global memory
+// a token.  That traffic was 8.4 MB a token a layer (dim * d_state * 2 * n_head floats), about 1.4 TB a prompt, and
+// --time-stages puts 81% of a prompt's time in this kernel's stage.  A thread's slice is padded to d_state + 1 so
+// that the threads of a warp, which walk one j at a time, land on different banks.  The arithmetic is the other
+// kernel's, in the same order: only where the state lives changes.
+__global__ void mamba_scan_shared_kernel(const float* __restrict__ x, const float* __restrict__ B,
+                                         const float* __restrict__ C, const float* __restrict__ dt,
+                                         const float* __restrict__ a, const float* __restrict__ d,
+                                         float* __restrict__ state, float* __restrict__ y, int dim, int n_head,
+                                         int d_state, int n_group, int rows,
+                                         float* __restrict__ snap, size_t stride, unsigned snaps) {
+    extern __shared__ float shared[];
+    const int h = blockIdx.x, i1 = threadIdx.x;
+    if (i1 >= dim) return;
+    const int x_row = dim * n_head + 2 * d_state * n_group;
+    const int g = h / (n_head / n_group);
+    const int pad = d_state + 1;
+    float* s = shared + (size_t) i1 * pad;
+    float* const home = state + (size_t) (h * dim + i1) * d_state;
+    for (int j = 0; j < d_state; ++j) s[j] = home[j];
+    for (int row = 0; row < rows; ++row) {
+        const float dt_sp = softplus(dt[row * n_head + h]);
+        const float dA = expf(dt_sp * a[h]);
+        const float* xr = x + size_t(row) * x_row;
+        const float* Br = B + size_t(row) * x_row + g * d_state;
+        const float* Cr = C + size_t(row) * x_row + g * d_state;
+        const float xv = xr[h * dim + i1];
+        const float x_dt = xv * dt_sp;
+        float sumf = 0.0f;
+        for (int j = 0; j < d_state; ++j) {
+            const float st = s[j] * dA + Br[j] * x_dt;
+            s[j] = st;
+            sumf += st * Cr[j];
+        }
+        y[size_t(row) * n_head * dim + h * dim + i1] = sumf + d[h] * xv;
+        if (float* m = snap_of(snap, stride, snaps, row)) {
+            m += size_t(h * dim + i1) * d_state;
+            for (int j = 0; j < d_state; ++j) m[j] = s[j];
+        }
+    }
+    for (int j = 0; j < d_state; ++j) home[j] = s[j];
+}
+
 // silu(z) * y and the grouped RMS norm, in place.  One block a token's group of n values; z is z_row apart a row.
 __global__ void mamba_norm_kernel(float* __restrict__ y, const float* __restrict__ z, int z_row,
                                   const float* __restrict__ w, int n, int n_group, float eps) {
@@ -2621,8 +2665,14 @@ void mamba_scan(const float* x, const float* B, const float* C, const float* dt,
     if (rows <= 0) return;
     if (n_group < 1 || n_head % n_group)
         throw std::invalid_argument("mamba_scan: the heads do not fall into groups");
-    mamba_scan_kernel<<<grid((size_t) n_head * dim, 256), 256, 0, cs(stream)>>>(x, B, C, dt, a, d, state, y, dim,
-        n_head, d_state, n_group, rows, snap, stride, snaps);
+    const size_t sh = (size_t) dim * (size_t) (d_state + 1) * sizeof(float);
+    if (dim >= 32 && dim <= 1024 && sh <= 48u * 1024u) {
+        mamba_scan_shared_kernel<<<n_head, dim, sh, cs(stream)>>>(x, B, C, dt, a, d, state, y, dim, n_head, d_state,
+                                                                 n_group, rows, snap, stride, snaps);
+    } else {
+        mamba_scan_kernel<<<grid((size_t) n_head * dim, 256), 256, 0, cs(stream)>>>(x, B, C, dt, a, d, state, y, dim,
+            n_head, d_state, n_group, rows, snap, stride, snaps);
+    }
     if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
         throw std::runtime_error(std::string("mamba_scan: ") + cudaGetErrorString(e));
 }
