@@ -1033,6 +1033,31 @@ int64_t Engine::vram_free_mib() const {
     return next_ ? std::min(mib, next_->vram_free_mib()) : mib;
 }
 
+// STRATA_WIN_DBG=1: a weighted sum of every recurrent layer's state, and of the state's largest value, at this
+// position.  Two runs that put the same tokens through different call shapes (a token alone, a window, a window
+// whose guesses were partly wrong) must agree here at every position: that is what keep() promises.  Debug only.
+void Engine::dbg_state(const char* tag) const {
+    if (!std::getenv("STRATA_WIN_DBG")) return;
+    if (!state_ || state_n_ == 0) {
+        std::fprintf(stderr, "state %s pos=%lld: none\n", tag, (long long) pos_);
+        return;
+    }
+    static std::vector<float> host;
+    OnCard here(device_, split_);
+    host.resize(state_n_);
+    ck(cudaMemcpy(host.data(), state_, state_n_ * sizeof(float), cudaMemcpyDeviceToHost), "state");
+    double all = 0.0, rec = 0.0, diff = 0.0;
+    float mx = 0.f;
+    for (size_t i = 0; i < state_n_; ++i) {
+        all += (double) host[i] * (double) (1 + (int) (i % 251));
+        if (i < rec_n_) rec += (double) host[i] * (double) (1 + (int) (i % 97));
+        if (i && host[i] != host[i - 1]) diff += 1.0;
+        if (std::fabs(host[i]) > mx) mx = std::fabs(host[i]);
+    }
+    std::fprintf(stderr, "state %s pos=%lld n=%zu rec=%zu fp=%.10g recfp=%.10g max=%.6g chg=%.0f\n", tag,
+                 (long long) pos_, state_n_, rec_n_, all, rec, (double) mx, diff);
+}
+
 // The kernel's own free-VRAM figure for this card, every client counted -- including other programs, which
 // hipMemGetInfo on this stack does not report (.pi/plans/poly-hip/m24-live-oscillation.txt, m25-128k.txt).  The card
 // is found once, by asking HIP for this device's PCI id and matching it to the DRM cards' uevents; -1 when that or

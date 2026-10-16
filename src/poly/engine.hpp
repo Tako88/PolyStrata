@@ -291,6 +291,10 @@ public:
     /// first card's reserve and the least that one of them has free.
     int reserve_mib() const { return reserve_mib_; }
     int64_t vram_free_mib() const;
+    /// A STRATA_WIN_DBG fingerprint of every recurrent layer's state, and of the counters that describe it: two
+    /// runs that took the same tokens through different call shapes (a token alone, a window) must agree here.
+    /// Debug aid only.
+    void dbg_state(const char* tag) const;
     int64_t card_free_mib() const; ///< the card's own free VRAM, every client counted; -1 when it cannot be read
     /// True when the sizing and monitoring figures come from the card itself (Options::vram_free_from): the card's
     /// own free VRAM, where hipMemGetInfo counts this process alone on this stack.  Inert on CUDA, where

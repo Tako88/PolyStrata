@@ -78,6 +78,22 @@ struct Sampling {
     unsigned long long seed = 0;
 };
 
+// STRATA_WIN_DBG=1: what a logits row holds, to compare the paths a round can take (the token alone against a
+// window).  Debug aid only: nothing here is read by the engine.
+void dbg_top(const float* logits, int n_vocab, int k, const char* tag) {
+    std::vector<std::pair<float, int>> all((size_t) n_vocab);
+    for (int i = 0; i < n_vocab; ++i) all[(size_t) i] = {logits[i], i};
+    k = std::min(k, n_vocab);
+    std::partial_sort(all.begin(), all.begin() + k, all.end(),
+                      [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
+                          return a.first != b.first ? a.first > b.first : a.second < b.second;
+                      });
+    std::fprintf(stderr, "%s", tag);
+    for (int i = 0; i < k; ++i)
+        std::fprintf(stderr, " %d:%+.4f", all[(size_t) i].second, (double) all[(size_t) i].first);
+    std::fprintf(stderr, "\n");
+}
+
 // llama.cpp's sampler chain in its default order: penalties, top-k, top-p, min-p, temperature, then the draw.
 class Sampler {
 public:
@@ -430,11 +446,17 @@ struct Session {
             return false;
         };
         if (max_new > 0) {
+            const bool dbg = std::getenv("STRATA_WIN_DBG") != nullptr;
             int32_t w[strata::spec::DraftPolicy::kMaxT], d[strata::spec::DraftPolicy::kMaxT];
             int32_t t = pick(engine.logits());   // picked, and not shown yet
+            if (dbg) {
+                std::fprintf(stderr, "first pos=%lld pick=%d top:", (long long) engine.pos(), t);
+                dbg_top(engine.logits(), engine.n_vocab(), 4, "");
+            }
             while (show(t)) {
                 // t goes into the model now, and with it guesses at what follows when there are any that pay
                 const Clock::time_point round = Clock::now();
+                engine.dbg_state("pre");
                 const bool room = engine.pos() + most <= engine.max_context();
                 const int offered = look && room ? repeats.propose(most - 1, w + 1) : 0;
                 const int match = repeats.last_match();
@@ -463,20 +485,43 @@ struct Session {
                 if (use.t == 1) {
                     engine.eval(&t, 1, true);
                     kept.read(&t, 1);
+                    engine.dbg_state("post");
                     t = pick(engine.logits());
+                    if (dbg) {
+                        std::fprintf(stderr, "one  pos=%lld pick=%d top:", (long long) engine.pos(), t);
+                        dbg_top(engine.logits(), engine.n_vocab(), 4, "");
+                    }
                     policy.observe(false, 1, 0, 0, count(1, 1));
                     continue;
                 }
                 w[0] = t;
                 if (!use.lookup) std::copy(d, d + use.t - 1, w + 1);
+                if (dbg) {
+                    std::fprintf(stderr, "WIN  pos=%lld t=%d lookup=%d w=", (long long) engine.pos(), use.t,
+                                 (int) use.lookup);
+                    for (int i = 0; i < use.t; ++i) std::fprintf(stderr, " %d", w[i]);
+                    std::fprintf(stderr, "\n");
+                }
                 engine.window(w, use.t);
                 // logits_of(i) is what follows w[i].  A guess that is what was picked has been through the model
                 // already; the token an answer ends with is shown and never fed, as without guesses.
                 int right = 0;
                 bool more = true;
                 t = pick(engine.logits_of(0));
-                while (right < use.t - 1 && t == w[right + 1] && (more = show(t))) t = pick(engine.logits_of(++right));
+                if (dbg) {
+                    std::fprintf(stderr, "  win0 pick=%d guess=%d top:", t, use.t > 1 ? w[1] : -1);
+                    dbg_top(engine.logits_of(0), engine.n_vocab(), 4, "");
+                }
+                while (right < use.t - 1 && t == w[right + 1] && (more = show(t))) {
+                    if (dbg)
+                        std::fprintf(stderr, "  win%d pick=%d = guess %d\n", right + 1, t, w[right + 1]);
+                    t = pick(engine.logits_of(++right));
+                }
+                if (dbg && right < use.t - 1)
+                    std::fprintf(stderr, "  win%d pick=%d != guess %d (rejected, keep %d)\n", right + 1, t,
+                                 w[right + 1], right + 1);
                 engine.keep(right + 1);
+                engine.dbg_state("post");
                 kept.read(w, right + 1);
                 r.guessed += use.t - 1;
                 r.guessed_right += right + (more ? 0 : 1);
