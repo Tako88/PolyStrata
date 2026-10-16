@@ -382,8 +382,9 @@ an RX 9070 XT 16 GB and a Radeon AI PRO R9700 32 GB (both gfx1201), a Ryzen 9 39
 
 ## strata-poly on AMD (beta)
 
-The four smaller models of PolyStrata's own engine (Qwen3.6, Ornith 1.5, Gemma 4, Tiel Coder) and GLM 5.3 Flash
-run through `strata-poly`, which is CUDA-shaped code; since 0.1.42-poly.4 it compiles for an AMD card through the
+The families of PolyStrata's own engine (`strata-poly`) — Qwen3.6, Ornith 1.5, Gemma 4, Tiel Coder, LFM2.5-24B-A2B,
+DeepSeek V4 Flash, GLM 5.3 Flash and Nemotron-3.5-Bolt-74B-A9B — run through it, which is CUDA-shaped code; since
+0.1.42-poly.4 it compiles for an AMD card through the
 same `hip_compat` headers as the main engine, with the CUDA driver's virtual memory calls mapped onto HIP's
 (`hip_compat/cuda.h`). Linux only: there is no ready-made AMD engine, and setup refuses these models on an AMD
 card under Windows.
@@ -417,6 +418,34 @@ card under Windows.
   parting 0.0001 to 0.005; each side gives itself the same tokens in a second round). The two sum an expert's
   products in a different order, and a near tie goes the other way. On CUDA the port changes nothing: the same
   tokens and speed as before on an RTX 5090.
+
+### Nemotron-3.5-Bolt-74B-A9B on an RX 9060 XT (gfx1200)
+
+Measured by the port's author on an RX 9060 XT (gfx1200, 16,304 MiB; Ryzen 5 5600X, 12 threads, 31.3 GiB of RAM,
+Linux, ROCm 7.2.4), with the 22,018,326,528-byte `NVIDIA-Nemotron-3.5-Bolt-74B-A9B-IQ2_XXS.gguf` (sha256
+`91d63363…`). The engine is `strata-poly` built for gfx1200 (the vendored ggml `3cf03257`); the reference is
+llama.cpp `b76b133` (build 11670). Medians of three runs, `--threads 12 --conversation-cache-mib 0 --temperature 0
+--top-k 1 --seed 0 --window 1 --lookup 0 --vram-reserve-mib 2048`, a 2,000- and a 20,000-token prompt and a
+200-token answer, VRAM from `/sys/class/drm/card1/device/mem_info_vram_used`:
+
+| Prompt | Context | Reads, tokens/s | Writes, tokens/s | Experts in VRAM | Peak VRAM | Peak RSS |
+| --- | --- | ---: | ---: | --- | --- | --- |
+| 2,000 | 8192 | 586.7 | 31.66 | 7,024 of 13,824 (50.8%; 7.9 GiB) | 14,786 MiB | 22,080 MiB |
+| 2,000 | 32768 | 628.8 | 31.91 | 7,024 of 13,824 (50.8%; 7.9 GiB) | 14,783 MiB | 22,083 MiB |
+| 20,000 | 32768 | 558.0 | 28.02 | 7,024 of 13,824 (50.8%; 7.9 GiB) | 14,946 MiB | 23,316 MiB |
+| llama.cpp, `-ncmoe 40`, `-p 2048 -n 128` | — | 449.28 ± 1.13 | 23.01 ± 0.02 | about 9.6 GiB | 15.40 GiB of 16.30 | — |
+
+The answers are equivalent to llama.cpp's: on the CPU-expert path the two are 64 ids identical on the short and
+the 1,200-token prompt, and a word differs only where the model's own top two candidates are within 5% — the bar
+`tools/parity_llama.py` (commits `f3001757` and `192de1a2`) measures against the two revisions above. The
+gpu-expert path diverges on a tie of that size and takes the reference's own second candidate.
+
+The Mamba-2 state is 164.7 MiB (40 layers × 1,079,296 floats) and its three window snapshots 494 MiB; the
+attention caches are 128 MiB at 32K, 4,096 B a token. All of that is inside the peak VRAM above. 131072 and 262144
+were computed, not run (4.27 GiB and 4.77 GiB before the expert cache, with `--kv-whole` taking the 512 MiB and
+1 GiB attention cache up front); the shipped config keeps 32768. M9 did not re-run the 32K parity check (M6 ran
+it on the same 9060 XT, all 64 ids identical); the 20,000-token parity case and generation through the installed
+setup config were not run on an AMD card either. CUDA was not built and is not claimed: no `nvcc`, no NVIDIA card.
 
 ## Community-validated cards
 
