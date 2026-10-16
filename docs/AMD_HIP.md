@@ -441,11 +441,18 @@ the 1,200-token prompt, and a word differs only where the model's own top two ca
 gpu-expert path diverges on a tie of that size and takes the reference's own second candidate.
 
 The Mamba-2 state is 164.7 MiB (40 layers × 1,079,296 floats) and its three window snapshots 494 MiB; the
-attention caches are 128 MiB at 32K, 4,096 B a token. All of that is inside the peak VRAM above. 131072 and 262144
-were computed, not run (4.27 GiB and 4.77 GiB before the expert cache, with `--kv-whole` taking the 512 MiB and
-1 GiB attention cache up front); the shipped config keeps 32768. M9 did not re-run the 32K parity check (M6 ran
-it on the same 9060 XT, all 64 ids identical); the 20,000-token parity case and generation through the installed
-setup config were not run on an AMD card either. CUDA was not built and is not claimed: no `nvcc`, no NVIDIA card.
+attention caches are 128 MiB at 32K and 512 MiB at 128K, 4,096 B a token. All of that is inside the peak VRAM
+above. **131072 was run** (16 Oct, after the 32K rows): the engine read a 111,049-token prompt at **307 tok/s**
+(3.26 ms a token) with 5,912 expert slots (6.5 GiB) in VRAM, and a 111,087-token prompt through the server came
+back with its first 64 tokens at a 14.68 GiB peak; a 137,157-token prompt was refused rather than truncated
+("request exceeds the context window"). At that depth the eight attention blocks are 2.28 of the 3.26 ms a token
+(1.57 at 65,536 tokens, 3.08 at 98,304), while the experts stay near 0.5 ms — so the prompt rate falls from
+586 tok/s at 2,000 tokens to 307 at 111,000, and decode at that depth was not measured separately. 262144 was
+computed, not run (4.77 GiB before the expert cache, with `--kv-whole` taking the 1 GiB attention cache up
+front); the shipped config now keeps 131072 (it kept 32768 until 16 Oct). M9 did not re-run the 32K parity check
+(M6 ran it on the same 9060 XT, all 64 ids identical); the 20,000-token parity case and generation through the
+installed setup config were not run on an AMD card either. CUDA was not built and is not claimed: no `nvcc`, no
+NVIDIA card.
 
 ## Community-validated cards
 
