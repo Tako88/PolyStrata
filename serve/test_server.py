@@ -991,6 +991,31 @@ class ApiKeyForms(unittest.TestCase):
             httpd.server_close()
 
 
+class ToolCallStrayedInsideTheBlock(unittest.TestCase):
+    """A model that strays inside the call block - a repeated `</parameter>`, then its own text - must not have that
+    text read as the parameter's value.  Caught through llama-swap with NVIDIA-Nemotron-3.5-Bolt-74B-A9B (IQ2_XXS,
+    temp 0.6), where the engine was sent `read_file` with the path
+    "TASK.md\\n</parameter>\\n</parameter>\\nHalton\\n</parameter>\\nHalton (or perhaps there's a hidden file)"."""
+    SCHEMA = [{"name": "read_file", "parameters": {"properties": {"path": {"type": "string"}}}}]
+    TEXT = ("</think>\n\n<tool_call>\n<function=read_file>\n<parameter=path>\nTASK.md\n</parameter>\n"
+            "</parameter>\nHalton\n</parameter>\nHalton (or perhaps there's a hidden file)\n</parameter>\n"
+            "</function>\n</tool_call>")
+
+    def test_the_stray_text_is_not_the_value(self):
+        from serve.frontend import OutputParser
+        for stream_tools in (False, True):
+            for step in (1, 7, 10_000):
+                with self.subTest(stream_tools=stream_tools, step=step):
+                    p = OutputParser(thinking=True, tools=self.SCHEMA, stream_tools=stream_tools)
+                    evs = []
+                    for i in range(0, len(self.TEXT), step):
+                        evs += p.feed(self.TEXT[i:i + step])
+                    evs += p.finish()
+                    calls = [e.call for e in evs if e.kind == "tool_call"]
+                    self.assertEqual([c.arguments for c in calls], [{"path": "TASK.md"}])
+                    self.assertEqual(calls[0].name, "read_file")
+
+
 class ToolCallTerminators(unittest.TestCase):
     """#210: a value that contains </parameter> or </tool_call> (a file documenting the call format) is kept whole."""
     CONTENT = ("Close each value with </parameter> and the call with </function></tool_call>.\n"

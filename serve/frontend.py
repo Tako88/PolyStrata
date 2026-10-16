@@ -715,7 +715,10 @@ FUNC_END = "</function>"
 def param_end(text: str, final: bool = False) -> int:
     """Where a parameter value in `text` ends: the first `</parameter>` followed (after whitespace) by the next
     `<parameter=` or `</function>` - the same text inside a value (a file that documents the call format, #210) is
-    part of the value.  -1: none yet; -2: a candidate whose follower has not arrived (streaming; `final` accepts it)."""
+    part of the value.  A `</parameter>` followed by *any other* markup ends the value too: a model that strays
+    inside the block (a repeated `</parameter>`, then its own text) would otherwise have that text read as the
+    value.  Prose after a `</parameter>` still does not end it, which is what #210 needs.  -1: none yet; -2: a
+    candidate whose follower has not arrived (streaming; `final` accepts it)."""
     at = text.find(PARAM_END)
     while at >= 0:
         after = text[at + len(PARAM_END):].lstrip()
@@ -723,6 +726,9 @@ def param_end(text: str, final: bool = False) -> int:
             return at
         if not after or "<parameter=".startswith(after) or FUNC_END.startswith(after):
             return at if final else -2
+        if after.startswith("<"):
+            # some other tag - a repeated `</parameter>`, `</tool_call>`, or a partial one: the value ends here
+            return at
         at = text.find(PARAM_END, at + 1)
     return -1
 
