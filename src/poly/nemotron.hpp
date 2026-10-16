@@ -37,8 +37,10 @@ protected:
     int head_key(int il, int n) const override;
     void layer_head(Layer& L, int il, int n) override;
     void layer_tail(Layer& L, int il, int n) override;
+    void shift_rows(ptrdiff_t by) override;
     void output_rows(int first, int rows, float* h) override;
     void route(int il, const float* logits, int32_t token, int* ids, float* w, float* tmp) const override;
+    bool route_card(int il, int n, int32_t* ids, float* w) override;
     void moe_shared(const Layer& L, int il, int n) override;
     void save_layer(int il, int64_t pos, uint8_t* dst) override;
 
@@ -64,6 +66,10 @@ private:
 
     /// The Mamba-2 block's forward: the projection, the convolution, the scan and the grouped norm.
     void mamba(Block& B, int il, int n);
+    /// The attention block's forward: the three projections, the keys and values into the caches, the attention
+    /// and the output projection.  This architecture applies no rotary embedding (NoPE), so there is no head norm
+    /// and no rope launch (ref/src/llama-model.cpp:3467-3472).
+    void attn(Block& B, int64_t pos, int n);
 
     std::vector<Block> blocks_;      ///< one a layer of layers_, plus the draft block (there is none here)
     std::vector<uint8_t> kind_;      ///< a layer's kind: 0 Mamba-2, 1 attention, 2 MoE
@@ -88,15 +94,16 @@ private:
 
     // device scratch, row after row for rows_ tokens
     float* proj_ = nullptr;      ///< the ssm_in projection (d_in_proj_ a token)
-    float* xbc_ = nullptr;       ///< the x|B|C slice before the convolution (conv_dim_ a token)
     float* conv_ = nullptr;      ///< the convolution's output (conv_dim_ a token)
-    float* z_ = nullptr;         ///< the gate part of the projection (d_inner_ a token)
     float* y_ = nullptr;         ///< the scan's output (d_inner_ a token)
     float* dt_ = nullptr;        ///< the time steps (n_ssm_head_ a token)
     float* lat_ = nullptr;       ///< the MoE's latent (moe_latent_ a token)
     void* latq_ = nullptr;       ///< lat_ in Q8_1
     float* lat_acc_ = nullptr;   ///< the routed experts' latent sum
-    float* q_ = nullptr, *kraw_ = nullptr, *k_ = nullptr, *v_ = nullptr, *att_ = nullptr, *score_ = nullptr;
+    float* tmp_ = nullptr;       ///< the MoE's latent-up projection (n_embd_ a token)
+    // The Mamba-2 block reads the x|B|C slice and the gate straight out of proj_: it needs no scratch of its own
+    // beyond the scan's output, so the buffers M3 first named for them are gone.
+    float* q_ = nullptr, *k_ = nullptr, *v_ = nullptr, *att_ = nullptr, *score_ = nullptr;
     float* awork_ = nullptr;     ///< a prompt batch's attention (attend_batch)
 };
 

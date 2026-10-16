@@ -1981,7 +1981,7 @@ bool Engine::batched(const Layer& L, int n) const { return mmq_ && L.mmq && n >=
 // The router's scores, and the copies of them and of the experts' input to the host.
 void Engine::moe_router(const Layer& L, int n) {
     router_scores(L, n);
-    copy2(rl_, h_rl_, n * n_expert_, moe_in(), h_x_, n * moe_in_w(), st_);
+    copy2(rl_, h_rl_, n * L.n_expert, moe_in(), h_x_, n * moe_in_w(), st_);
 }
 
 // The routed experts of tokens that come a few at a time.  moe_router() is on its way, with ev_ behind it.  True
@@ -2011,7 +2011,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
         for (int t = 0; t < m; ++t) {
             int ids[kMaxUsed];
             float w[kMaxUsed];
-            route(il, h_rl_ + (size_t) (at + t) * n_expert_, tok_ ? tok_[at + t] : -1, ids, w, route_tmp_.data());
+            route(il, h_rl_ + (size_t) (at + t) * L.n_expert, tok_ ? tok_[at + t] : -1, ids, w, route_tmp_.data());
             for (int k = 0; k < L.n_used; ++k) {
                 const size_t e = (size_t) ids[k];
                 ++use_[(size_t) il * n_expert_ + e];
@@ -2220,9 +2220,9 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         copy2(d_ids_, h_ids_, rr, d_wts_, w, rr, st_);
         if (spare) copy2(moe_in(), h_x_, n * moe_in_w(), nullptr, nullptr, 0, st_);
     } else if (spare) {
-        copy2(rl_, h_rl_, n * n_expert_, moe_in(), h_x_, n * moe_in_w(), st_);
+        copy2(rl_, h_rl_, n * L.n_expert, moe_in(), h_x_, n * moe_in_w(), st_);
     } else {
-        ck(cudaMemcpyAsync(h_rl_, rl_, (size_t) n * n_expert_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
+        ck(cudaMemcpyAsync(h_rl_, rl_, (size_t) n * L.n_expert * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
            "router");
     }
     ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
@@ -2275,7 +2275,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         float* tmp = route_tmp_.data() + (size_t) p * 2 * n_expert_;
         const int end = (int) ((int64_t) n * (p + 1) / parts);
         for (int t = (int) ((int64_t) n * p / parts); t < end; ++t)
-            route(il, h_rl_ + (size_t) t * n_expert_, tok_ ? tok_[t] : -1, ids_.data() + (size_t) t * L.n_used,
+            route(il, h_rl_ + (size_t) t * L.n_expert, tok_ ? tok_[t] : -1, ids_.data() + (size_t) t * L.n_used,
                   w + (size_t) t * L.n_used, tmp);
     });
     count_.assign((size_t) n_expert_, 0);

@@ -1,7 +1,7 @@
 // src/poly/nemotron.cpp - the layers of NVIDIA-Nemotron-3.5-Bolt-74B-A9B (llama.cpp architecture
 // "nemotron_h_moe").  The reference for the geometry and the load is llama.cpp's nemotron-h loader and its
-// mamba-base graph (ref/src/models/mamba-base.cpp, ref-nemotron-h.cpp); the Mamba-2 block's forward is here
-// (M4), the attention and the latent MoE are M5.
+// mamba-base graph (ref/src/models/mamba-base.cpp, ref-nemotron-h.cpp); the Mamba-2 block's forward is M4, and
+// the attention, the latent MoE with its shared expert and the routing are M5 (forward pass complete).
 #include "nemotron.hpp"
 
 #include "runtime.hpp"
@@ -20,8 +20,7 @@ namespace strata::poly {
 namespace {
 
 constexpr size_t kScoreFloats = size_t(16) << 20;  // the attention's scores of the tokens it takes at a time
-// The Mamba-2 blocks run (M4); this block's forward, the output head and the routed experts are M5.
-const char* const kForward = "nemotron_h_moe: this block's forward is not built yet (milestone M5)";
+constexpr float kMinWeightSum = 6.103515625e-5f;   // the floor ggml's MoE graph puts under the gate sum
 
 // M4's independent check of the decay path.  `--dump-layers` forces window = rows = 1, so Engine::dbg() ever sees
 // only a call's first row, and pos = 1 of a 2-token call (where the scan's `s[j] = s0[j] * dA + B[j] * x_dt` has
@@ -294,27 +293,39 @@ void Nemotron::alloc_caches() {
     chunk_ = (int) std::clamp<size_t>(kScoreFloats / ((size_t) n_head_ * opt_.max_context), 1, (size_t) rows_);
 }
 
-// Per-token buffers hold rows_ tokens, row after row.  The values stay unwritten until the forward is built
-// (M4/M5); the sizes here are the ones the plan's M3 loads and allocates.
+// Per-token buffers hold rows_ tokens, row after row.  The Mamba-2 block reads its x|B|C slice and its gate out
+// of proj_ (mamba()), so there is no separate buffer for either; the MoE's latent-up projection lands in tmp_.
 void Nemotron::assign_scratch() {
     const size_t n = (size_t) rows_;
     const size_t heads = n * n_head_ * head_dim_, kv = n * n_kv_ * head_dim_;
     proj_ = fbuf(n * d_in_proj_);
-    xbc_ = fbuf(n * conv_dim_);
     conv_ = fbuf(n * conv_dim_);
-    z_ = fbuf(n * d_inner_);
     y_ = fbuf(n * d_inner_);
     dt_ = fbuf(n * n_ssm_head_);
     lat_ = fbuf(n * moe_latent_);
     lat_acc_ = fbuf(n * moe_latent_);
+    tmp_ = fbuf(n * n_embd_);
     latq_ = fbuf((kernels::native_q8_1_bytes(moe_latent_) * n + sizeof(float) - 1) / sizeof(float));
     q_ = fbuf(heads);
-    kraw_ = fbuf(kv);
     k_ = fbuf(kv);
     v_ = fbuf(kv);
     att_ = fbuf(heads);
     score_ = fbuf((size_t) chunk_ * n_head_ * opt_.max_context);
     if (rows_ >= kStageRows) awork_ = fbuf(heads + heads / 2 + 1 + 3 * n * n_head_);   // a prompt batch's attention
+}
+
+// The latent MoE's expert I/O lives in the arch's own scratch (moe_in_ = lat_, moe_acc_ = lat_acc_) instead of the
+// base engine's shifted xn_/fo_, so those buffers have to move with the row the base shift_rows() moves.  A window
+// with experts on the CPU goes through the layers in two halves (run(), engine.cpp:2607); without this, half 1's
+// layer_head() would write lat_/latq_ at the unshifted base and clobber half 0's before half 0's moe() consumed it.
+// moe_in_/moe_acc_ re-point in layer_head(), which always runs after the shift.  The rest of the scratch (q_, k_, v_,
+// att_, score_, awork_, u_, dt_) is produced and consumed inside one head call, so it needs nothing here.
+void Nemotron::shift_rows(ptrdiff_t by) {
+    Engine::shift_rows(by);
+    lat_ += by * moe_latent_;
+    latq_ = (uint8_t*) latq_ + by * (ptrdiff_t) kernels::native_q8_1_bytes(moe_latent_);
+    lat_acc_ += by * moe_latent_;
+    tmp_ += by * n_embd_;
 }
 
 // A Mamba-2 layer's scan state and convolution window lie one behind the other in state_ (alloc_caches()).
@@ -359,7 +370,7 @@ void Nemotron::load_card_rows(const uint8_t* src, int64_t from, int64_t count, i
     }
 }
 
-// ---- the forward pass: the Mamba-2 block (M4); the attention, the latent MoE and the output head are M5 ----
+// ---- the forward pass: the Mamba-2 block (M4), the attention and the latent MoE with its shared expert (M5) ----
 
 // The Mamba-2 block.  The projection splits into z, x|B|C and dt in that order (ref/src/models/mamba-base.cpp:
 // 185-208); the convolution takes four taps over x|B|C and its SiLU; the scan carries the state; and the
@@ -386,16 +397,63 @@ void Nemotron::mamba(Block& B, int il, int n) {
     lin(B.ssm_out, y_, ao_, n);
 }
 
-// A layer from its input to its output (the MoE's router copy is M5).  Every block norm has this shape; only a
-// Mamba-2 block's sublayer exists yet.
+// The attention block.  Queries, keys and values are one projection each; the keys and values take their rows in
+// the caches at the position on the card (at_), so a recorded launch replays for every position; the attention's
+// scale is 1/sqrt(head_dim) (ref-nemotron-h.cpp:285-289).  No rope and no head norm: this architecture maps to
+// LLAMA_ROPE_TYPE_NONE (ref/src/llama-model.cpp:3467-3472).
+void Nemotron::attn(Block& B, int64_t pos, int n) {
+    const long long* at = recording_ ? at_ : nullptr;   // a recorded launch: the tokens from what at_ holds
+    lin(B.wq, xn_, q_, n, xq_);
+    lin(B.wk, xn_, k_, n, xq_);
+    lin(B.wv, xn_, v_, n, xq_);
+    if (at) {
+        store_f16_at(k_, B.keys, n_kv_ * head_dim_, at, n, 0, st_);
+        store_f16_at(v_, B.vals, n_kv_ * head_dim_, at, n, 0, st_);
+    } else {
+        store_f16(k_, B.keys, n_kv_ * head_dim_, pos, n, st_);
+        store_f16(v_, B.vals, n_kv_ * head_dim_, pos, n, st_);
+    }
+    const float scale = 1.f / std::sqrt((float) head_dim_);
+    // a prompt batch through cuBLAS; a few tokens with the kernels that give a token the same bits in any company
+    if (n >= kStageRows)
+        attend_batch(blas_, q_, B.keys, B.vals, pos, n, score_, (size_t) chunk_ * n_head_ * opt_.max_context, awork_,
+                     att_, head_dim_, n_head_, n_kv_, scale, st_);
+    else
+        attend(q_, B.keys, B.vals, pos, n, score_, chunk_, att_, head_dim_, n_head_, n_kv_, scale, st_, 0, 0, false,
+               at, at ? room(n) : 0);
+    lin(B.wo, att_, ao_, n);
+}
+
+// A layer from its input to its residual.  Every block has one attn_norm and the sublayer reads that normed input.
+// A Mamba-2 or attention block adds its sublayer output to the residual here; a latent MoE block does not -- its
+// routed experts run on the latent, so the sum is completed in layer_tail().
 void Nemotron::layer_head(Layer& L, int il, int n) {
     Block& B = blocks_[(size_t) il];
     rms_norm(r_, fp(L.attn_norm), xn_, n_embd_, n, rms_eps_, st_);
     kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
     dbg("attn_in", il, xn_, n_embd_);
     dump_rows(pos_, "attn_in", il, xn_, n_embd_, n, cs(st_));
-    if (!B.recr) throw std::runtime_error(kForward);
-    mamba(B, il, n);
+    if (B.recr) {
+        mamba(B, il, n);
+    } else if (B.attn) {
+        attn(B, pos_, n);
+    } else {
+        // The latent MoE: the experts' input is the narrow projection of the normed input, and the routed sum
+        // lands in lat_acc_.  The plan's note 4: this loader refuses a file whose expert width key is absent, where
+        // the reference falls back to n_ff/n_expert_used (ref-nemotron-h.cpp:117-119); this file has the array.
+        lin(B.lat_down, xn_, lat_, n, xq_);
+        kernels::native_quantize_q8_1(lat_, latq_, moe_latent_ * n, 1, st_);
+        moe_in_ = lat_;
+        moe_in_xq_ = latq_;
+        moe_in_w_ = moe_out_w_ = moe_latent_;
+        moe_acc_ = lat_acc_;
+        // The routed experts' sum accumulates into moe_acc_ (add_scaled/moe_sum/moe_add), so it starts from
+        // nothing here: lat_acc_ is one buffer for every MoE layer and every token, and without this the sum of a
+        // layer and token would hold the ones before it.
+        ck(cudaMemsetAsync(lat_acc_, 0, (size_t) n * moe_latent_ * sizeof(float), cs(st_)), "experts");
+        if (!batched(L, n)) moe_router(L, n);   // a prompt batch routes in moe_rows()
+        return;
+    }
     dbg("attn", il, ao_, n_embd_);
     dump_rows(pos_, "attn", il, ao_, n_embd_, n, cs(st_));
     axpy(ao_, 1.f, r_, n * n_embd_, true, st_);
@@ -404,9 +462,100 @@ void Nemotron::layer_head(Layer& L, int il, int n) {
 // An attention block's launches are sized by the rows they read; a Mamba-2 block's are the same for any size.
 int Nemotron::head_key(int il, int n) const { return blocks_[(size_t) il].attn ? room_key(n) : 0; }
 
-void Nemotron::layer_tail(Layer&, int, int) { throw std::runtime_error(kForward); }
-void Nemotron::output_rows(int, int, float*) { throw std::runtime_error(kForward); }
-void Nemotron::route(int, const float*, int32_t, int*, float*, float*) const { throw std::runtime_error(kForward); }
-void Nemotron::moe_shared(const Layer&, int, int) { throw std::runtime_error(kForward); }
+// A latent MoE layer's output: the routed sum projected back up to the width of the stream and added to the shared
+// expert's output (the reference's `cur = moe_out + ffn_shexp`, ref-nemotron-h.cpp:336-343), then the residual.
+// The shared expert ran in moe_shared() and left its output in fo_; the routed sum is in moe_acc_ (lat_acc_).
+void Nemotron::layer_tail(Layer& L, int il, int n) {
+    Block& B = blocks_[(size_t) il];
+    dbg("ffn_moe_out", il, moe_acc(), moe_latent_);
+    dump_rows(pos_, "ffn_moe_out", il, moe_acc(), moe_latent_, n, cs(st_));
+    lin(B.lat_up, moe_acc(), tmp_, n);
+    axpy(tmp_, 1.f, fo_, n * n_embd_, true, st_);
+    dbg("ffn_out", il, fo_, n_embd_);
+    dump_rows(pos_, "ffn_out", il, fo_, n_embd_, n, cs(st_));
+    axpy(fo_, 1.f, r_, n * n_embd_, true, st_);
+}
+
+void Nemotron::output_rows(int first, int rows, float* h) {
+    rms_norm(r_ + (size_t) first * n_embd_, fp(out_norm_), h, n_embd_, rows, rms_eps_, st_);
+}
+
+// The shared expert: an ungated up, ReLU², the down; its output goes to fo_, where the routed sum is added to it
+// (ref-nemotron-h.cpp:338-343).  It runs on the GPU while the host routes.
+void Nemotron::moe_shared(const Layer& L, int il, int n) {
+    lin(L.sh_up, xn_, u_, n, xq_);
+    relu2_rows(u_, n_ff_shexp_, n, st_);
+    lin(L.sh_down, u_, fo_, n);
+    dbg("ffn_shexp", il, fo_, n_embd_);
+    dump_rows(pos_, "ffn_shexp", il, fo_, n_embd_, n, cs(st_));
+}
+
+// What ggml's MoE graph does for this model: sigmoid gates, the n_used largest of gate + bias, weights from the
+// bare gates, made to sum to one, floored as ggml does, times the file's expert_weights_scale.  The per-layer
+// counts are the layer's own (L.n_expert/L.n_used), not the model-wide maxima.  The reference's ffn_moe_topk is
+// this selection (ref-nemotron-h.cpp:318-330).
+void Nemotron::route(int il, const float* logits, int32_t token, int* ids, float* w, float* probs) const {
+    const Layer& L = layers_[(size_t) il];
+    const std::vector<float>& bias = blocks_[(size_t) il].probs_b;
+    float* pick = probs + L.n_expert;
+    for (int e = 0; e < L.n_expert; ++e) {
+        probs[e] = 1.f / (1.f + std::exp(-logits[e]));
+        pick[e] = probs[e] + bias[(size_t) e];
+    }
+    float sum = 0.f;
+    for (int k = 0; k < L.n_used; ++k) {
+        int best = 0;
+        for (int e = 1; e < L.n_expert; ++e)
+            if (pick[e] > pick[best]) best = e;
+        pick[best] = -INFINITY;
+        ids[k] = best;
+        w[k] = probs[best];
+        sum += w[k];
+    }
+    const float denom = w_norm_ ? std::max(sum, kMinWeightSum) : 1.f;
+    for (int k = 0; k < L.n_used; ++k) {
+        w[k] /= denom;
+        if (w_scale_ != 0.f) w[k] *= w_scale_;
+    }
+    // Opt-in: the layer's chosen ids and normalised weights, on the host, beside the reference's ffn_moe_topk.
+    if (const char* e = std::getenv("STRATA_NEMOTRON_ROUTE"); e && *e && *e != '0') {
+        std::fprintf(stderr, "route blk=%d token=%d host", il, token);
+        for (int k = 0; k < L.n_used; ++k) std::fprintf(stderr, " %d:%.6f", ids[k], w[k]);
+        std::fprintf(stderr, "\n");
+    }
+}
+
+// A prompt batch's routing on the card, and -- with STRATA_NEMOTRON_ROUTE set -- the card's picks and weights
+// beside the host route()'s for the same scores.  A top-1 id mismatch is a failure whatever the weights.
+bool Nemotron::route_card(int il, int n, int32_t* ids, float* w) {
+    const Layer& L = layers_[(size_t) il];
+    const Block& B = blocks_[(size_t) il];
+    route_rows(rl_, L.n_expert, L.n_used, n, 1, 1.f, fp(B.probs_b_dev), nullptr, w_norm_, w_scale_, ids, w, st_);
+    const char* e = std::getenv("STRATA_NEMOTRON_ROUTE");
+    if (e && *e && *e != '0') {
+        // The card's picks and the scores they came from, back to the host, then the same route() over them.
+        std::vector<float> lr((size_t) n * L.n_expert);
+        std::vector<float> cw((size_t) n * L.n_used);
+        std::vector<int32_t> cid((size_t) n * L.n_used);
+        ck(cudaStreamSynchronize(cs(st_)), "route dump");
+        ck(cudaMemcpy(lr.data(), rl_, lr.size() * sizeof(float), cudaMemcpyDeviceToHost), "route dump");
+        ck(cudaMemcpy(cw.data(), w, cw.size() * sizeof(float), cudaMemcpyDeviceToHost), "route dump");
+        ck(cudaMemcpy(cid.data(), ids, cid.size() * sizeof(int32_t), cudaMemcpyDeviceToHost), "route dump");
+        for (int t = 0; t < n; ++t) {
+            int hid[kMaxUsed];
+            float hw[kMaxUsed];
+            std::vector<float> tmp((size_t) 2 * L.n_expert);
+            route(il, lr.data() + (size_t) t * L.n_expert, t, hid, hw, tmp.data());
+            std::fprintf(stderr, "route blk=%d token=%d card", il, t);
+            for (int k = 0; k < L.n_used; ++k)
+                std::fprintf(stderr, " %d:%.6f%s", cid[(size_t) t * L.n_used + k],
+                             cw[(size_t) t * L.n_used + k], cid[(size_t) t * L.n_used + k] != hid[k] ? "(DIFF)" : "");
+            std::fprintf(stderr, " | host");
+            for (int k = 0; k < L.n_used; ++k) std::fprintf(stderr, " %d:%.6f", hid[k], hw[k]);
+            std::fprintf(stderr, "\n");
+        }
+    }
+    return true;
+}
 
 }  // namespace strata::poly
