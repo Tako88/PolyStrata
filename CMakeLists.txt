@@ -1790,8 +1790,11 @@ if(STRATA_NATIVE_EXPERTS AND (STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP) AND NOT S
     set(_strata_mmq ${_strata_gg}/src/ggml-cuda)
   endif()
   set(_strata_poly_mmq_instances "")
+  # The list mirrors STRATA_POLY_MMQ_TYPES in src/poly/mmq.cu.  nvfp4 is the one entry that is not a K-quant or an
+  # I-quant: Nemotron-3.5-Bolt keeps its dense ssm_in and ssm_out in it, and ggml has the kernel for a card that is
+  # not Blackwell as well (the generic NVFP4 SRAM layout, Q8_1 activations).
   foreach(_t q4_0 q4_1 q5_0 q5_1 q8_0 q2_k q3_k q4_k q5_k q6_k iq1_s iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl
-             iq4_xs)
+             iq4_xs nvfp4)
     list(APPEND _strata_poly_mmq_instances ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
   endforeach()
   if(STRATA_ENABLE_HIP)

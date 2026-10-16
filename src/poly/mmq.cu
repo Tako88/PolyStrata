@@ -13,9 +13,16 @@ namespace strata::poly {
 namespace {
 
 // The types with kernels in this build: one template instance each in CMakeLists.txt.
+//
+// NVFP4 is the one non-K-quant, non-I-quant here, for Nemotron-3.5-Bolt: its dense ssm_in and ssm_out are 2.47 GB
+// of NVFP4 that a layer's prompt batch needs, and without this entry they were the only dense matrices falling to
+// native_mmvq - eight tokens a call, against weights read once.  ggml has the kernel for a card that is not
+// Blackwell too: mmq-config-rdna4.cuh carries the four NVFP4 tiles with the generic NVFP4 SRAM layout
+// (GGML_CUDA_MMQ_SRAM_LAYOUT_NVFP4), and that layout takes Q8_1 activations like the K-quants' do, an int8 DP4A
+// product (MMQ_DP4A_TXS_Q8_0_16, mmq.cuh:408) rather than Blackwell's FP4 x FP4.
 #define STRATA_POLY_MMQ_TYPES(X)                                                                                \
     X(Q4_0) X(Q4_1) X(Q5_0) X(Q5_1) X(Q8_0) X(Q2_K) X(Q3_K) X(Q4_K) X(Q5_K) X(Q6_K)                             \
-    X(IQ1_S) X(IQ2_XXS) X(IQ2_XS) X(IQ2_S) X(IQ3_XXS) X(IQ3_S) X(IQ4_NL) X(IQ4_XS)
+    X(IQ1_S) X(IQ2_XXS) X(IQ2_XS) X(IQ2_S) X(IQ3_XXS) X(IQ3_S) X(IQ4_NL) X(IQ4_XS) X(NVFP4)
 
 int64_t pad512(int64_t n) { return (n + 511) / 512 * 512; }
 
