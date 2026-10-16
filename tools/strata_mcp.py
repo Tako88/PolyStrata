@@ -163,6 +163,13 @@ FALLBACK_FAMILIES = {
                                        "download_gb": 13.6, "ram_gb": 18, "arena_gb": 11.5},
                         "UD-Q4_K_XL": {"about": "4-bit experts, 5- and 6-bit where they write",
                                        "download_gb": 22.7, "ram_gb": 27, "arena_gb": 20.0}}},
+    "nemotron": {"title": "Nemotron-3.5-Bolt-74B-A9B", "about": "on the strata-poly engine: Linux, one NVIDIA or "
+                                                             "AMD card; a 22 GB file, ~26 GB of RAM beside an 8 GB "
+                                                             "card; no images",
+                 "tag": "nemotron-", "engine": "poly", "vision": False, "experimental": True,
+                 "models": {"IQ2_XXS": {"about": "2-bit i-quant experts (IQ2_XXS) with NVFP4 dense weights, the "
+                                                 "only size",
+                                        "download_gb": 22.0, "ram_gb": 26, "arena_gb": 17.51}}},
 }
 FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]
 BENCH_PROMPT = ("Write a short story (about 300 words) about a lighthouse keeper who finds a message in a bottle. "
