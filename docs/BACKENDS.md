@@ -20,16 +20,16 @@ a second machine, a Windows laptop whose card has 8 GB.
 | Tiel Coder 35B-A3B | `qwen35moe` | `strata-poly` | peculiar-ragdoll's UD-Q3_K_XL, UD-IQ3_XXS and UD-Q4_K_XL, 13.6 to 22.7 GB | draft block in the file |
 | DeepSeek V4 Flash | `deepseek4` | `strata-poly` | Unsloth UD-IQ2_XXS, three files, 90.9 GB | repeats only: its draft model is not run yet |
 | LFM2.5-24B-A2B | `lfm2moe` | `strata-poly` | Unsloth UD-Q4_K_XL, UD-Q3_K_XL, UD-Q6_K_XL and Q8_0, Liquid AI QAD-Q4_0, 10.9 to 25.5 GB | repeats only: there is no draft model |
+| Nemotron-3.5-Bolt-74B-A9B | `nemotron_h_moe` | `strata-poly` | Unsloth IQ2_XXS, 22.0 GB | repeats only: there is no draft block |
 
 `strata` is the first engine and runs Qwen3.8 only; nothing in it changed. `strata-poly` is the engine that reads a
-GGUF in place, and it now has four architectures. It was called `strata-glm`, after its first model; an install
+GGUF in place, and it now has six architectures. It was called `strata-glm`, after its first model; an install
 from then keeps its engine and moves to the new name the next time setup updates it.
 
 ## Install
 
-Setup installs all seven. The four new models are in its list of models, and each has a family name that goes
-straight to it. GLM 5.3 Flash and DeepSeek V4 Flash, the two large ones, have pages of their own,
-[GLM.md](GLM.md) and [DEEPSEEK.md](DEEPSEEK.md):
+Setup installs all eight. Each has a family name that goes straight to it; GLM 5.3 Flash, DeepSeek V4 Flash and
+LFM2.5-24B-A2B have pages of their own, [GLM.md](GLM.md), [DEEPSEEK.md](DEEPSEEK.md) and [LFM.md](LFM.md):
 
 ```bash
 ./setup.sh --family qwen36
@@ -47,6 +47,10 @@ straight to it. GLM 5.3 Flash and DeepSeek V4 Flash, the two large ones, have pa
 ./setup.sh --family tiel
 ```
 
+```bash
+./setup.sh --family nemotron
+```
+
 | Family | Model | File | Download | RAM beside an 8 GB card (estimate) |
 | --- | --- | --- | --- | --- |
 | `qwen36` | Qwen3.6-35B-A3B | Unsloth UD-Q3_K_M | 17.1 GB | about 21 GB |
@@ -61,6 +65,7 @@ straight to it. GLM 5.3 Flash and DeepSeek V4 Flash, the two large ones, have pa
 | `tiel` | Tiel Coder 35B-A3B | UD-Q3_K_XL | 17.2 GB | about 21 GB |
 | | | UD-IQ3_XXS | 13.6 GB | about 18 GB |
 | | | UD-Q4_K_XL | 22.7 GB | about 27 GB |
+| `nemotron` | Nemotron-3.5-Bolt-74B-A9B | Unsloth IQ2_XXS | 22.0 GB | about 26 GB |
 
 A family's first size is the one setup takes. On a PC with less RAM than that wants it takes the second, the
 smallest, and the third is by name: `--model UD-Q4_K_M`, `--model APEX-I-QUALITY`, `--model UD-Q4_K_XL`. The
@@ -141,7 +146,7 @@ writes one token and the server adds the two that llama.cpp puts around the rows
 - CUDA graphs for a token's fixed launches
 - the serve protocol, sampling, statistics
 
-An architecture is a class derived from `Engine` (`Glm5Next`, `Qwen35`, `Gemma4`). It supplies:
+An architecture is a class derived from `Engine` (`Glm5Next`, `Qwen35`, `Gemma4`, `Nemotron`). It supplies:
 
 | Hook | What it does |
 | --- | --- |
@@ -183,6 +188,7 @@ key, so a model the engine cannot run is listed as unavailable with the reason i
 | `gemma4` | `Gemma4` |
 | `deepseek4` | `DeepSeek4` |
 | `lfm2moe` | `Lfm2Moe` |
+| `nemotron_h_moe` | `Nemotron` |
 
 Within an architecture the shape comes from the file: layer counts, widths, head counts, expert counts, which
 layers have which attention, whether there is a draft block. Qwen3.6 and Ornith 1.5 are one class because their
@@ -198,10 +204,16 @@ and, by the tokenizer's `pre` name, how the model writes its reasoning and its t
 | Gemma 4 | `<\|channel>thought` to `<channel\|>`, opened by the model | `<\|tool_call>call:NAME{key:value,...}<tool_call\|>` |
 | DeepSeek V4 | the prompt opens it, `</think>` ends it | `<｜DSML｜invoke name="NAME"><｜DSML｜parameter name="K" string="true">V...` |
 | LFM2.5 | the prompt opens it, `</think>` ends it | `<\|tool_call_start\|>[NAME(K='V', ...), NAME2()]<\|tool_call_end\|>` |
+| Nemotron-3.5-Bolt | the prompt opens it, `</think>` ends it | `<tool_call><function=NAME><parameter=P>...` |
 
 Gemma 4's template thinks only when it is told to, reads a tool in OpenAI's shape and starts with the tokenizer's
 `<bos>`; the server gives it all three. A tool's answers are put in the order of their calls for every model,
 because a model reads them by position.
+
+Nemotron-3.5-Bolt's vocabulary is a BPE vocabulary whose tokenizer `pre` name is `pixtral`, Mistral's pre-tokenizer
+name; `tools/strata_tokenizer.py` gives it the same llama3-group policy as `lfm2` (the pattern, with merges
+ignored). Its template is ChatML (`<\|im_start\|>system|user|assistant`, `<\|im_end\|>`), the calls above, and
+tool results as `<tool_response>`.
 
 ## The registry
 
@@ -1945,7 +1957,9 @@ Setup knows the files in the table above. Another file of one of these architect
 
 ## Limits
 
-- NVIDIA cards only. Built and run on one Linux machine, and the three new models' nine sizes on one Windows
+- NVIDIA cards only for `strata`, the first engine. `strata-poly` also compiles for AMD cards through HIP: it
+  has run on an RX 7600 (8 GB) and, for Nemotron-3.5-Bolt-74B-A9B, on an RX 9060 XT (gfx1200, 16 GB)
+  ([AMD_HIP.md](AMD_HIP.md)). The nine sizes of the four smaller models were built and run on one Windows
   laptop as well. GLM 5.3 Flash was not run on Windows. Two cards can share a model since 2026-10-11
   ([MULTI_GPU.md](MULTI_GPU.md#the-strata-poly-models)); that ran with Qwen3.6 and Gemma 4 on two RTX 3080
   under Linux only.
