@@ -3150,8 +3150,12 @@ class Service:
         end a reply, and how it writes a tool call."""
         self.literals = literal_tags(getattr(tokenizer, "control_tokens", ()))
         im_end = tokenizer.encode(IM_END, parse_special=True)
+        endoftext = tokenizer.encode("<|endoftext|>", parse_special=True)
         if len(im_end) == 1:
-            self.stop_ids = set(im_end + tokenizer.encode("<|endoftext|>", parse_special=True))
+            # <|endoftext|> is added only when it is one token too.  A tokenizer that lacks it - Nemotron-3.5's,
+            # whose end of text is <|im_end|> (eos_token_id 11) - encodes the literal as ordinary pieces, and
+            # adding those put ` <` in the stop list, so every tool call ended at the `<` of its `<tool_call>`.
+            self.stop_ids = set(im_end + endoftext) if len(endoftext) == 1 else set(im_end)
         else:   # not a ChatML model (GLM): the ids its GGUF names for the end of the text, the turn and the message
             special = getattr(tokenizer, "special_ids", None) or {}
             self.stop_ids = {special[k] for k in ("tokenizer.ggml.eos_token_id", "tokenizer.ggml.eot_token_id",

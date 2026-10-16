@@ -231,7 +231,9 @@ TEMPLATE = """{%- set enable_thinking = enable_thinking if enable_thinking is de
 
 
 class NemotronTokens(ByteTokenizer):
-    SPECIALS = ["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<|tool_call>", "</tool_call>",
+    # the GGUF's own set: <|im_start|>/<|im_end|> are CONTROL, the tool tags USER_DEFINED, and there is no
+    # <|endoftext|> in the vocabulary (eos_token_id 11 is <|im_end|>)
+    SPECIALS = ["<|im_start|>", "<|im_end|>", "<|tool_call>", "</tool_call>",
                 "<|tool_response>", "</tool_response>"]
     ALWAYS = ("<|tool_call>", "</tool_call>", "<|tool_response>", "</tool_response>")
     pre = "pixtral"
@@ -255,6 +257,9 @@ class ServiceForNemotron(unittest.TestCase):
         self.assertEqual(self.svc.call_format, "function")
         self.assertEqual(self.svc.turn_ids, frozenset({self.tok.SPECIALS.index("<|im_start|>") + 256}))
         self.assertEqual(self.svc.think_open_ids, [])
+        # the vocabulary has no <|endoftext|>: only <|im_end|> ends a reply, not the pieces of that literal
+        self.assertEqual(self.svc.stop_ids, {self.tok.SPECIALS.index("<|im_end|>") + 256})
+        self.assertNotIn(ord("<"), self.svc.stop_ids)
 
     def test_the_capabilities_of_the_template(self):
         # the rendered prompt carries the tool list and the call format; a finished turn's reasoning is dropped
