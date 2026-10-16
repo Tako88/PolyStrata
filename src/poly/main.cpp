@@ -51,6 +51,7 @@ using strata::poly::CacheOptions;
 using strata::poly::Conversations;
 using strata::poly::Engine;
 using strata::poly::Guesses;
+using strata::poly::KvFmt;
 using strata::poly::Options;
 using Clock = std::chrono::steady_clock;
 
@@ -366,6 +367,13 @@ struct Session {
         Clock::time_point t0 = Clock::now(), shown = t0;   // bringing a parked conversation back is prompt time
         engine.images(pictures.at.data(), (int) pictures.at.size());
         r.resume = kept.resume(ids);
+        if (const size_t freed = engine.trim_kv(n)) {
+            const int had = engine.cached_experts();
+            engine.mind_vram();
+            std::fprintf(stderr, "strata-poly: the attention caches gave back %.2f GiB that this request and the one "
+                                 "before do not reach; the expert cache %d -> %d experts\n",
+                         double(freed) / double(1ull << 30), had, engine.cached_experts());
+        }
         kept.turn_at(turn_at);
         asked += n;
         reused += r.resume;
@@ -802,6 +810,8 @@ void usage() {
                  "                         as a CUDA graph and replayed)\n"
                  "  --kv-whole             give the attention caches VRAM for the whole context at load (default: as\n"
                  "                         the conversation grows, the expert cache having the rest until then)\n"
+                 "  --kv fmt               the K and V attention caches' format: fp16 (default, unchanged) or q8_0\n"
+                 "                         (ggml Q8_0 blocks: half the KV VRAM, slightly different answers); opt-in\n"
                  "  --expert-swaps N       while an answer is written, up to N experts it keeps using are on their way\n"
                  "                         into VRAM, in place of cached ones it uses less (default 64, 0 = the cache\n"
                  "                         stays as it was loaded)\n"
@@ -883,6 +893,22 @@ int main(int argc, char** argv) {
         else if (a == "--any-node") o.stay_near = false;
         else if (a == "--no-graphs") o.graphs = false;
         else if (a == "--kv-whole") o.kv_grow = false;
+        else if (a == "--kv") {
+            const std::string fmt = val();
+            if (fmt == "fp16") o.kv_format = KvFmt::kFp16;
+            else if (fmt == "q8_0") {
+#ifdef STRATA_USE_HIP
+                std::fprintf(stderr, "strata-poly: --kv q8_0 is not supported on this backend (CUDA only)\n");
+                std::exit(2);
+#else
+                o.kv_format = KvFmt::kQ8_0;
+#endif
+            }
+            else {
+                std::fprintf(stderr, "strata-poly: --kv %s: unknown format (use fp16 or q8_0)\n", fmt.c_str());
+                std::exit(2);
+            }
+        }
         else if (a == "--window") o.window = std::atoi(val());
         else if (a == "--lookup") lookup = std::atoi(val());
         else if (a == "--no-draft") o.draft = false;

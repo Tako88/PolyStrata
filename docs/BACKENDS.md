@@ -18,6 +18,7 @@ a second machine, a Windows laptop whose card has 8 GB.
 | Ornith 1.5 35B-A3B | `qwen35moe` | `strata-poly` | APEX-MTP-I-Compact, I-Mini and I-Quality, 14.4 to 23.7 GB | draft block in the file |
 | Gemma 4 26B-A4B | `gemma4` | `strata-poly` | Unsloth UD-Q3_K_M, UD-Q2_K_XL and UD-Q4_K_M, 10.5 to 16.9 GB | its draft model, a file of 0.46 GB |
 | Tiel Coder 35B-A3B | `qwen35moe` | `strata-poly` | peculiar-ragdoll's UD-Q3_K_XL, UD-IQ3_XXS and UD-Q4_K_XL, 13.6 to 22.7 GB | draft block in the file |
+| MiniCPM-V 4.7 35B-A3B | `qwen35moe` | `strata-poly` | OpenBMB Q4_K_M, mix_q3gud_im and Q6_K, 15.5 to 28.5 GB | none: it answers one token at a time |
 | DeepSeek V4 Flash | `deepseek4` | `strata-poly` | Unsloth UD-IQ2_XXS, three files, 90.9 GB | repeats only: its draft model is not run yet |
 | LFM2.5-24B-A2B | `lfm2moe` | `strata-poly` | Unsloth UD-Q4_K_XL, UD-Q3_K_XL, UD-Q6_K_XL and Q8_0, Liquid AI QAD-Q4_0, 10.9 to 25.5 GB | repeats only: there is no draft model |
 | Nemotron-3.5-Bolt-74B-A9B | `nemotron_h_moe` | `strata-poly` | Unsloth IQ2_XXS, 22.0 GB | repeats only: there is no draft block |
@@ -28,7 +29,7 @@ from then keeps its engine and moves to the new name the next time setup updates
 
 ## Install
 
-Setup installs all eight. Each has a family name that goes straight to it; GLM 5.3 Flash, DeepSeek V4 Flash and
+Setup installs all nine. Each has a family name that goes straight to it; GLM 5.3 Flash, DeepSeek V4 Flash and
 LFM2.5-24B-A2B have pages of their own, [GLM.md](GLM.md), [DEEPSEEK.md](DEEPSEEK.md) and [LFM.md](LFM.md):
 
 ```bash
@@ -45,6 +46,10 @@ LFM2.5-24B-A2B have pages of their own, [GLM.md](GLM.md), [DEEPSEEK.md](DEEPSEEK
 
 ```bash
 ./setup.sh --family tiel
+```
+
+```bash
+./setup.sh --family minicpmv
 ```
 
 ```bash
@@ -65,6 +70,9 @@ LFM2.5-24B-A2B have pages of their own, [GLM.md](GLM.md), [DEEPSEEK.md](DEEPSEEK
 | `tiel` | Tiel Coder 35B-A3B | UD-Q3_K_XL | 17.2 GB | about 21 GB |
 | | | UD-IQ3_XXS | 13.6 GB | about 18 GB |
 | | | UD-Q4_K_XL | 22.7 GB | about 27 GB |
+| `minicpmv` | MiniCPM-V 4.7 35B-A3B | Q4_K_M | 21.2 GB | about 25 GB |
+| | | mix_q3gud_im | 15.5 GB | about 19 GB |
+| | | Q6_K | 28.5 GB | about 31 GB |
 | `nemotron` | Nemotron-3.5-Bolt-74B-A9B | Unsloth IQ2_XXS | 22.0 GB | about 26 GB |
 
 A family's first size is the one setup takes. On a PC with less RAM than that wants it takes the second, the
@@ -99,7 +107,7 @@ installs it there.
 Each install is a model of its own: `--list-models`, `/model` and the web page's list show all of them, and
 `./setup.sh --check` has a line for each with what this PC's card and RAM make of it.
 
-The four new models read pictures. Say yes to setup's question about images, or pass `--vision yes`:
+The five new models read pictures. Say yes to setup's question about images, or pass `--vision yes`:
 
 ```bash
 ./setup.sh --family gemma4 --vision yes
@@ -310,6 +318,9 @@ use and mean GPU and CPU load while it ran. The speeds and the cache figures are
 counters. A long prompt is so many characters of this repository's documents, four a token, so its length in
 tokens moves with the tokenizer and with those documents. One that the server refuses as longer than the
 context is sent again at 95%, 90% and 85% of its text.
+
+The first run after the PC starts reads the model file from the disk again. A user's GLM 5.3 Flash on Windows wrote
+at 14 to 24 tokens/s in that run and at 28 to 29 in the next one, so run the benchmark twice and keep the second.
 
 Tokens per second on the machine above, context 32768, every expert in VRAM for the three new models, as setup
 installs them. The first build of each backend read the longest prompt at 636, 632 and 213 tokens/s and wrote

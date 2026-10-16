@@ -258,6 +258,7 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--draft-model FILE.gguf` | | a file of the same model to take that block from, when `--model` has none; setup passes the one it downloaded |
 | `--draft-vocab N` | 131072 for Qwen3.6, Ornith and Tiel Coder, all of it for the others | the block guesses among the vocabulary's first N tokens; 0 = all |
 | `--kv-whole` | on an AMD card | give the attention caches VRAM for the whole context at load, not as the conversation grows; setup writes it for an AMD card, where ROCm keeps the VRAM the expert cache gives back ([AMD_HIP.md](AMD_HIP.md#strata-poly-on-amd-beta)) |
+| `--kv fmt` | fp16 | the K and V attention caches' format: `fp16` (default, unchanged) or `q8_0` (ggml Q8_0 blocks: one fp16 scale a 32-value block of int8 codes): half the KV VRAM, the same answers on the tested models ([Q8_KV.md](Q8_KV.md)) |
 | `--prompt-batch N` | 1024 | prompt tokens read at a time, 1 to 4096; about 1.4 MiB of VRAM each |
 | `--stage-mib N` | 2048 | VRAM the experts outside the cache pass through while a prompt is read |
 | `--stage-ahead N` | 1024 | from N tokens, a batch copies those experts before the layer has chosen, as does every batch of a prompt of N tokens or more that is read several at a time; 0 = never |
@@ -273,6 +274,11 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 
 `strata-poly` with no arguments prints the list, with the options for running it without the server.
 
+`--kv q8_0` is new: it stores the attention K and V caches as ggml Q8_0 blocks and is opt-in for the
+`qwen35moe` models. [Q8_KV.md](Q8_KV.md) has the format, the measured VRAM saving (46.88% at 131072), the
+fp16↔q8_0 parity on Tiel, Ornith and Occamy, and what was left alone (the `strata` engine, `glm5next`, Gemma 4,
+the default path).
+
 ## What is missing
 
 - Other files of the model. The engine reads the layouts of four converters (neurall's llama.cpp fork,
@@ -284,6 +290,8 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
   ([issue 10](https://github.com/VecSzn/PolyStrata/issues/10)): 1,483 experts in VRAM, 26 to 30 tokens/s after
   a short prompt, 10K tokens read at 375 to 395. The context set to 1,048,576 in the run config loaded and
   answered, and one request of 557K tokens was read at 286 tokens/s with the three facts planted in it found.
+  With 0.1.44.1-poly.5 a request of 1,002,452 tokens was read in 45.7 minutes (66.3 with poly.2), the three
+  facts found, and from the second request after it the engine wrote at 25 to 30 tokens/s again.
 - Intel cards, and AMD cards on Windows. On Linux setup compiles the engine for an AMD card
   ([AMD_HIP.md](AMD_HIP.md#strata-poly-on-amd-beta)), a beta tested with Qwen3.6 and Ornith on an RX 7600; GLM
   itself has not been tried on one, and setup says so. Two NVIDIA cards can share the model

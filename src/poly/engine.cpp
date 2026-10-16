@@ -535,12 +535,14 @@ void* Engine::kv_alloc(size_t bytes, int per) {
 // reserve stays for what is recorded later.  A quarter of the reserve stays free whatever else took VRAM since
 // (mind_vram()).
 void Engine::cover(int64_t end) {
+    kv_reach_ = std::max(kv_reach_, end);
     if (kv_.empty() || end <= kv_rows_) return;
-    const int64_t rows = std::min<int64_t>(opt_.max_context, (end + kKvAhead + kKvGrow - 1) / kKvGrow * kKvGrow);
+    const int64_t rows = kv_rows_for(end);
     const auto size = [rows](const Kv& k) { return (size_t) ((rows + k.per - 1) / k.per) * k.bytes; };
     size_t more = 0, held = arena_.mapped;
     for (const Kv& k : kv_) {
-        more += std::min(up_to(size(k), grain_), k.reserved) - k.mapped;
+        const size_t want = std::min(up_to(size(k), grain_), k.reserved);
+        if (want > k.mapped) more += want - k.mapped;   // trim_card_kv() leaves a piece it cuts through
         held += k.mapped;
     }
     if (exp_) {
@@ -551,29 +553,62 @@ void Engine::cover(int64_t end) {
         if (free_b < more + quarter) cut = std::max(cut, more + quarter - free_b);
         if (cut) shrink_cache(cut);
     }
+    // in pieces of kKvGrow rows, so that trim_card_kv() can give back what a long read mapped in one go
+    const auto piece_of = [](const Kv& k) { return (size_t) ((kKvGrow + k.per - 1) / k.per) * k.bytes; };
 #if defined(STRATA_USE_HIP)
     // Every piece a Kv reservation holds has to be the same size on this stack: ROCm 7.2.4 on gfx1200 refuses
     // hipMemSetAccess when one reservation holds a whole piece (kKvGrow rows) together with a larger one -- 64
     // MiB then 1024 MiB fails and 15 x 64 MiB + 4 KiB fails 3/3, while 16 x 64 MiB holds (tests/hip/vmm_probe.cpp
-    // phase 3, .pi/plans/poly-hip/m4b-vmm.txt).  The load's cover(1) maps kKvGrow rows as one piece, and asking
+    // phase 3, .pi/plans/poly-hip/m4b-vmm.txt).  The load's cover(1) mapped kKvGrow rows as one piece, and asking
     // for the whole growth as one piece after it made the next piece a different size: a 20,000-token prompt at
     // --max-context 131072 stopped at "no VRAM for the attention cache (20 MiB more)" with 6 GiB of the card
     // free, and cutting the expert cache from 2274 experts to 1143 with --vram-reserve-mib 8192 did not move it.
-    // One kKvGrow-row chunk per piece keeps them equal.  A chunk is passed only when it is a whole number of the
-    // cache's `per` and of grain_ and the rows are a whole number of chunks -- then the mapping is complete, not
-    // short, which is what the caller below needs.  Otherwise today's one SIZE_MAX piece, which maps fully or
-    // throws.  CUDA keeps that piece: this driver takes any shape.
+    // The piece below is the one upstream maps everywhere, and it is safe here only while every piece is that
+    // size, which is what the four conditions check: the rows and the reservation are whole numbers of pieces,
+    // and a piece is a whole number of the cache's `per` and of grain_ (vmm_map() rounds a piece down to grain_).
+    // Where they do not hold, one SIZE_MAX piece, which maps fully or throws: with it the rows cannot be trimmed
+    // back, which is the price of a mapping that exists at all.  CUDA takes either shape, so it keeps upstream's.
     for (Kv& k : kv_) {
-        const size_t chunk = (size_t) ((kKvGrow + k.per - 1) / k.per) * k.bytes;
-        if (kKvGrow % k.per == 0 && chunk % grain_ == 0 && rows % kKvGrow == 0)
-            vmm_map(k, size(k), chunk, "the attention cache");
+        const size_t piece = piece_of(k);
+        if (kKvGrow % k.per == 0 && piece % grain_ == 0 && rows % kKvGrow == 0 && size(k) % piece == 0)
+            vmm_map(k, size(k), piece, "the attention cache");
         else
             vmm_map(k, size(k), SIZE_MAX, "the attention cache");
     }
 #else
-    for (Kv& k : kv_) vmm_map(k, size(k), SIZE_MAX, "the attention cache");
+    for (Kv& k : kv_)
+        vmm_map(k, size(k), piece_of(k), "the attention cache");
 #endif
     kv_rows_ = rows;
+}
+
+int64_t Engine::kv_rows_for(int64_t end) const {
+    return std::min<int64_t>(opt_.max_context, (end + kKvAhead + kKvGrow - 1) / kKvGrow * kKvGrow);
+}
+
+size_t Engine::trim_kv(int64_t end) {
+    size_t freed = 0;
+    for (Engine* e = this; e; e = e->next_.get()) freed += e->trim_card_kv(end);
+    return freed;
+}
+
+// A card that holds every expert keeps the whole context's rows (load()): nothing would take what they give back.
+size_t Engine::trim_card_kv(int64_t end) {
+    const int64_t before = kv_reach_;
+    kv_reach_ = end;
+    if (kv_.empty() || !exp_ || all_cached()) return 0;
+    const int64_t rows = kv_rows_for(std::max(end, before));
+    if (rows >= kv_rows_) return 0;
+    OnCard here(device_, split_);
+    ck(cudaDeviceSynchronize(), "the attention cache");
+    size_t freed = 0;
+    for (Kv& k : kv_) {
+        const size_t had = k.mapped;
+        vmm_unmap(k, (size_t) ((rows + k.per - 1) / k.per) * k.bytes);
+        freed += had - k.mapped;
+    }
+    kv_rows_ = rows;
+    return freed;
 }
 
 // Every expert on its way into the cache arrives and takes its slot.
@@ -885,6 +920,8 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
     const Shards file(o.model);
     const MetaValue* arch = file.get("general.architecture");
     const std::string name = arch ? arch->s : std::string();
+    if (o.kv_format == KvFmt::kQ8_0 && name != "qwen35moe")
+        throw std::runtime_error("--kv q8_0 is only supported for qwen35moe models in v1; this is a '" + name + "' model");
     const auto make = [&]() -> std::unique_ptr<Engine> {
         if (name == "glm5-next" || name == "glm5next") return std::make_unique<Glm5Next>();   // Unsloth: no hyphen
         if (name == "qwen35moe") return std::make_unique<Qwen35>();
