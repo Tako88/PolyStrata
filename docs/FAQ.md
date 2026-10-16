@@ -17,7 +17,7 @@ architectures, I'd like this work to go there, and I'm glad to help with that.
 
 Yes. It is built on Strata's own code: its quantized matvec kernels, its GGUF reader, its draft policy and suffix
 drafter, its conversation memory and the llama.cpp MMQ kernels Strata compiles. You can see the list in
-`CMakeLists.txt` (the `strata-poly` target). What is new is the model code for the four architectures and the
+`CMakeLists.txt` (the `strata-poly` target). What is new is the model code for the six architectures and the
 part that decides which experts sit in VRAM and which run on the CPU.
 
 ### How do I know the output is right?
@@ -107,8 +107,8 @@ So far it has run on Linux only.
 
 ### Why Q3 and Q2 by default on the smaller models? Isn't that a big quality loss?
 
-A 4-bit size is there for all four smaller models: `--model UD-Q4_K_M`, for Ornith `APEX-I-QUALITY` and for Tiel
-Coder `UD-Q4_K_XL`. The installer picks UD-Q3_K_M because on an 8 GB card more of its experts fit and its file is
+A 4-bit size is there for the smaller models: `--model UD-Q4_K_M`, for Ornith `APEX-I-QUALITY`, for Tiel
+Coder `UD-Q4_K_XL` and for LFM2.5 `UD-Q4_K_XL`. The installer picks UD-Q3_K_M because on an 8 GB card more of its experts fit and its file is
 lighter on 32 GB of RAM. The speeds are close on the laptop: Qwen3.6 writes a short chat at 94 to 100 tokens/s
 with Q3 and 84 to 85 with Q4. It only takes Q2 when the RAM is too small for Q3. On a card that holds the whole
 model, Q3 and Q4 run at about the same speed, so take Q4 if you have the memory.
@@ -120,7 +120,7 @@ which doesn't fit in RAM on a normal PC; the 2- and 3-bit GGUFs (79 to 114 GB) a
 
 ### Does it work on Windows?
 
-The four smaller models (Qwen3.6, Ornith 1.5, Gemma 4, Tiel Coder) and Qwen3.8-Flash-Next do. Setup downloads the
+The smaller models (Qwen3.6, Ornith 1.5, Gemma 4, Tiel Coder, LFM2.5-24B-A2B) and Qwen3.8-Flash-Next do. Setup downloads the
 new engine ready-made from the latest release, built for RTX 20 to RTX 50 cards. On a processor without AVX2, or
 when the engine's code changed after that release, it compiles the engine instead with Visual Studio's build tools
 and the CUDA toolkit, and offers to install them. GLM 5.3 Flash has only run on Linux.

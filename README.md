@@ -17,12 +17,12 @@ Qwen3.8-Flash-Next, GLM 5.3 Flash, DeepSeek V4 Flash, Qwen3.6, Ornith 1.5, Gemma
 PolyStrata runs large AI models on a normal PC, models that usually need a server. They chat, write code and work
 with your apps and coding agents. Nothing leaves your PC.
 
-It runs eight models, on two engines:
+It runs nine models, on two engines:
 
 - **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** on an NVIDIA or AMD graphics card with
   12 GB or more, on Windows or Linux. It also reads pictures. Its engine is the Strata project's, unchanged.
 
-The other seven run on an engine written for PolyStrata, with one NVIDIA card or [two](docs/MULTI_GPU.md#the-strata-poly-models): on Linux, and the five smaller ones on
+The other eight run on an engine written for PolyStrata, with one NVIDIA card or [two](docs/MULTI_GPU.md#the-strata-poly-models): on Linux, and the five smaller ones on
 Windows too. They are experimental: they have run on one PC with a 32 GB card, and the five smaller ones on a laptop
 with an 8 GB card as well.
 
@@ -38,6 +38,7 @@ with an 8 GB card as well.
 - **[Gemma 4 26B-A4B](docs/BACKENDS.md)**, a file of 11 to 17 GB. It also reads pictures.
 - **[Tiel Coder 35B-A3B](docs/BACKENDS.md)**, Ornith 1.5 quantized for coding agents by peculiar-ragdoll: a file of
   14 to 23 GB. It also reads pictures.
+- **[Nemotron-3.5-Bolt-74B-A9B](docs/BACKENDS.md)**, NVIDIA's Mamba-2 and mixture-of-experts model: a file of 22 GB.
 
 The server can change between installed models while it runs ([how](docs/BACKENDS.md#changing-the-model)).
 
@@ -274,7 +275,7 @@ Measured the same way, on the same two PCs.
 
 A prompt of 10,000 tokens is read at 1,670 tokens/s on the laptop and at 6,300 on the workstation.
 
-The seven models of PolyStrata's own engine were measured with its benchmark, which you can run on your PC:
+The eight models of PolyStrata's own engine were measured with its benchmark, which you can run on your PC:
 `python polystrata.py benchmark --model <name> --prompt-tokens 24000`
 ([what it sends and prints](docs/BACKENDS.md#benchmark)).
 What others measured on their own cards, and how to compare with llama.cpp on yours:
@@ -444,11 +445,11 @@ The installer finds your card and sets up the right engine for it. It asks you a
 - whether it should read pictures (GLM 5.3 Flash, DeepSeek V4 Flash and LFM2.5 read none).
 
 Press Enter each time for the recommended answer. Then it downloads the model (about 70 GB for Qwen3.8-Flash-Next,
-79 to 114 GB for GLM 5.3 Flash, 91 GB for DeepSeek V4 Flash, 11 to 25 GB for the other five) and starts it. If the download stops, run it again:
+79 to 114 GB for GLM 5.3 Flash, 91 GB for DeepSeek V4 Flash, 11 to 25 GB for the other six) and starts it. If the download stops, run it again:
 it continues where it left off. Your browser opens the PolyStrata app at `http://127.0.0.1:8080`.
 
-All eight are in the installer's list of models. `./setup.sh --family glm`, `deepseek`, `lfm25`, `qwen36`, `ornith`,
-`gemma4` or `tiel` goes straight to one ([what it asks and writes](docs/GLM.md#install)).
+All nine are in the installer's list of models. `./setup.sh --family glm`, `deepseek`, `lfm25`, `qwen36`, `ornith`,
+`gemma4`, `tiel` or `nemotron` goes straight to one ([what it asks and writes](docs/GLM.md#install)).
 
 > **While the model starts, your PC can be slow or stop responding for 1-3 minutes** (longest the first time).
 > PolyStrata loads 35-55 GB into your RAM and locks part of it for the graphics card. This is normal. Wait, and don't
@@ -601,7 +602,7 @@ such a PC.
 
 ## Using it
 
-All eight models are used the same way: the same app, the same API.
+All nine models are used the same way: the same app, the same API.
 
 <p align="center"><img src="docs/media/runpagoda.png" width="900" alt="The app's Monitor tab next to a coding agent"><br>
 <sub>The app's <b>Monitor</b> (left) while a coding agent writes the pagoda garden from the video (right). A screenshot from <a href="https://github.com/Niko1221/Strata">Strata</a>.</sub></p>

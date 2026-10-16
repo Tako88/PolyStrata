@@ -17,12 +17,12 @@ Qwen3.8-Flash-Next、GLM 5.3 Flash、DeepSeek V4 Flash、Qwen3.6、Ornith 1.5、
 PolyStrata 能在普通电脑上运行通常要用服务器才能跑的大型 AI 模型。它们能聊天、写代码，还能配合你的应用和编程智能体一起工作。
 所有数据都留在你的电脑上。
 
-它能跑八个模型，用两个引擎：
+它能跑九个模型，用两个引擎：
 
 - **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**：12 GB 及以上的 NVIDIA 或 AMD 显卡，Windows 或
   Linux。它还能看图片。引擎是 Strata 项目的，没有改动。
 
-另外七个用的是为 PolyStrata 写的引擎，需要一张 NVIDIA 显卡，也可以用[两张](docs/MULTI_GPU.md#the-strata-poly-models)：七个都能在 Linux 上跑，五个小的也能在 Windows 上跑。
+另外八个用的是为 PolyStrata 写的引擎，需要一张 NVIDIA 显卡，也可以用[两张](docs/MULTI_GPU.md#the-strata-poly-models)：八个都能在 Linux 上跑，五个小的也能在 Windows 上跑。
 目前是实验性的：只在一台 32 GB 显卡的电脑上跑过，五个小的另外在一台 8 GB 显卡的笔记本上跑过。
 
 - **[GLM 5.3 Flash](docs/GLM.md)**：最大的一个，文件 79 到 114 GB，大部分留在内存里。
@@ -33,6 +33,7 @@ PolyStrata 能在普通电脑上运行通常要用服务器才能跑的大型 AI
 - **[Ornith 1.5](docs/BACKENDS.md)**：结构和 Qwen3.6-35B-A3B 相同，权重不同，文件 14 到 24 GB。它还能看图片。
 - **[Gemma 4 26B-A4B](docs/BACKENDS.md)**：文件 11 到 17 GB。它还能看图片。
 - **[Tiel Coder 35B-A3B](docs/BACKENDS.md)**：peculiar-ragdoll 为编程智能体量化的 Ornith 1.5，文件 14 到 23 GB。它还能看图片。
+- **[Nemotron-3.5-Bolt-74B-A9B](docs/BACKENDS.md)**：NVIDIA 的 Mamba-2 混合专家模型，文件 22 GB。
 
 服务器运行时可以在已安装的模型之间切换（[做法](docs/BACKENDS.md#changing-the-model)，英文）。
 
@@ -260,7 +261,7 @@ Q8_0 在笔记本上占满了 32 GB 内存，所以在那里慢；工作站能�
 
 10,000 个 token 的提示，笔记本每秒读 1,670 个，工作站每秒读 6,300 个。
 
-用 PolyStrata 自己引擎的这七个模型，都是用它自带的跑分测的，你也可以在自己的电脑上跑：
+用 PolyStrata 自己引擎的这八个模型，都是用它自带的跑分测的，你也可以在自己的电脑上跑：
 `python polystrata.py benchmark --model <name> --prompt-tokens 24000`
 （[它发什么、打印什么](docs/BACKENDS.md#benchmark)，英文）。
 别人在自己的显卡上测的结果，以及怎么在你的电脑上和 llama.cpp 对比：
@@ -416,10 +417,10 @@ PolyStrata 的 [MCP 服务器](docs/MCP_SERVER.md)来安装、启动和停止 Po
 - 上下文多大（模型能记住多少文字），
 - 是否要识别图片（GLM 5.3 Flash、DeepSeek V4 Flash 和 LFM2.5 不支持）。
 
-每次直接按回车就是推荐选项。之后它会下载模型（Qwen3.8-Flash-Next 约 70 GB，GLM 5.3 Flash 79 到 114 GB，DeepSeek V4 Flash 91 GB，另外五个 11 到 25 GB）并启动。
+每次直接按回车就是推荐选项。之后它会下载模型（Qwen3.8-Flash-Next 约 70 GB，GLM 5.3 Flash 79 到 114 GB，DeepSeek V4 Flash 91 GB，另外六个 11 到 25 GB）并启动。
 如果下载中断了，再运行一次即可：它会从中断的地方继续。浏览器会打开 PolyStrata 应用，地址是 `http://127.0.0.1:8080`。
 
-八个模型都在安装程序的模型列表里。想直接装其中一个，运行 `./setup.sh --family glm`（或 `deepseek`、`lfm25`、`qwen36`、`ornith`、`gemma4`、`tiel`）
+九个模型都在安装程序的模型列表里。想直接装其中一个，运行 `./setup.sh --family glm`（或 `deepseek`、`lfm25`、`qwen36`、`ornith`、`gemma4`、`tiel`、`nemotron`）
 （[它会问什么、写什么](docs/GLM.md#install)）。
 
 > **模型启动时，你的电脑可能会变慢或卡住 1-3 分钟**（第一次最久）。
@@ -563,7 +564,7 @@ UD-Q4_K_XL 95.5%，QAD-Q4_0 92.7%，UD-Q3_K_XL 91.6%。
 
 ## 使用方法
 
-八个模型的用法一样：同一个应用，同一套 API。
+九个模型的用法一样：同一个应用，同一套 API。
 
 <p align="center"><img src="docs/media/runpagoda.png" width="900" alt="应用的 Monitor 标签页，旁边是一个编程智能体"><br>
 <sub>应用的 <b>Monitor</b>（左），编程智能体正在写视频里的宝塔花园（右）。截图来自 <a href="https://github.com/Niko1221/Strata">Strata</a>。</sub></p>
