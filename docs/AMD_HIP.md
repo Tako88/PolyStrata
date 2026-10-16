@@ -454,6 +454,37 @@ front); the shipped config now keeps 131072 (it kept 32768 until 16 Oct). M9 did
 installed setup config were not run on an AMD card either. CUDA was not built and is not claimed: no `nvcc`, no
 NVIDIA card.
 
+### The expert cache grows back after it gives VRAM up
+
+On this stack `hipMemUnmap` + `hipMemRelease` return nothing to `hipMemGetInfo`: releasing 2 GiB in 32 pieces
+leaves the free figure byte-identical, while the process can map that same memory again. Re-creating the pieces
+instead of keeping them is what costs: **Phase A** of `tests/hip/vmm_release_probe.cpp` (17 Oct, ROCm 7.2.4, HIP
+runtime 70253211, gfx1200) goes free 16,184 -> 14,006 MiB across the release, then re-maps all 32 and steps the
+kernel's own `used` figure 3,502 -> **5,550 MiB**, which nothing gets back. **Phase B** unmaps the last 16 pieces
+without releasing them and maps those same handles again: `used` stays flat at 3,502 MiB, and no check fails in
+either phase.
+
+The engine sizes and grows its expert cache from exactly that free figure, so a shrink could take the cache away
+for good. Measured with the binary before this change (LFM2.5-24B-A2B Q6_K, `--max-context 131072
+--vram-reserve-mib 2048`, the engine's own `VRAM` command): 1,638 experts -> **0**, and asking for the default
+reserve back left it at **0** with 0.0% of experts coming from VRAM. That is the shape a long 128K session hit on
+13 Oct: eleven `the expert cache` lines, then no VRAM hits for the rest of the process.
+
+Now a reservation keeps the pieces it gives up (`Mapped::free`, HIP only) and maps them again instead of asking
+the driver, and that pool counts as free where the engine sizes the cache and decides whether to grow. The same
+sequence on this checkout: 1,638 experts -> **797** (5.75 GiB) and back to **1,620** in 1.0 s; eight shrink and
+regrow cycles settle at **1,594** with `vram_pool_mib` 256-320 (the pieces no later growth asks for, released when
+the engine ends), and the card's own used figure flat at 15.52 GiB from the third cycle on. A greedy 200-token
+generation afterwards read **64.8 tok/s** with 92.6% of its expert lookups served from VRAM. The `INFO` line and
+the `VRAM` answer carry the pool as `vram_pool_mib`. The attention caches' growth is attempted before the expert
+cache is cut, and what a cut gives up on that path is released (`vmm_drop()`), because rows need VRAM the driver
+can hand out again. The CUDA path is untouched
+(`STRATA_USE_HIP` guards every branch), and the branch was not built here: no `nvcc` on this machine.
+
+  2026-10-13 measured the same recovery through the server's `POST /v1/vram` on the then-branch
+  (`--max-context 32768 --vram-reserve-mib 1536`): 6,113 experts down to 4,708 and back, `mem_info_vram_used`
+  flat at 15.00 GiB, and a short request afterwards at 92.5% cache hits against 0.0% before the change.
+
 ## Community-validated cards
 
 Run by their owners, not on the maintainers' machines; setup accepts them like gfx1100 / gfx1201. setup ships a
