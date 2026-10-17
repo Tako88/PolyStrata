@@ -79,9 +79,11 @@ struct Options {
     int expert_swaps = 64;        ///< experts on their way into the cache at a time while an answer is written, each
                                   ///< to the slot of one the answer uses less; 0: the cache stays as it was loaded
     bool same_answer = false;     ///< an answer depends on its tokens and not on how long a copy took: the cache
-                                  ///< hands an upload's slot over on the round's count (kSwapSettle) and the CPU's
-                                  ///< share of the spill stays at its own value, so the same prompt and settings
-                                  ///< give the same answer (--same-answer)
+                                  ///< hands an upload's slot over on the round's count (kSwapSettle), the CPU's
+                                  ///< share of the spill stays at its own value, a round's guesses come from the
+                                  ///< block's own probabilities (Guesses::timed) and a window always takes the same
+                                  ///< one of its two ways (window()), so the same prompt and settings give the
+                                  ///< same answer (--same-answer)
     bool stay_near = true;        ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts
     bool graphs = true;           ///< a token's fixed launches are recorded once, a CUDA graph a layer, and replayed
     bool kv_grow = true;          ///< the attention caches get VRAM as the sequence grows, where the card can map it
@@ -263,6 +265,10 @@ public:
     /// context.  logits() is left alone.  An architecture may guess with a small model of its own instead of a
     /// block (draft_step()); the calls are the same.
     bool drafts() const { return next_ ? next_->drafts() : draft_; }
+    /// --same-answer: the cache hands an upload's slot over on the round's count, the CPU's share of the spill
+    /// stays where it started, a round's guesses follow the block's own probabilities and a window always takes the
+    /// same of its two ways, so the same prompt and settings give the same answer (Options::same_answer).
+    bool same_answer() const { return opt_.same_answer; }
     /// Test only: the calls read()'s layer-major path gave the draft block's rows (draft_rows()) on the card that has
     /// the block, since load.  Two or more in one read are back-to-back refills of its pinned input rows.
     int64_t read_draft_calls_for_test() const { return next_ ? next_->read_draft_calls_for_test() : read_draft_calls_; }

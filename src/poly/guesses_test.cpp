@@ -1,6 +1,7 @@
 // src/poly/guesses_test.cpp - Guesses on a machine whose times are set: the block goes on guessing after a slow
 // stretch, a stalled round and a stalled ask, comes back when windows begin to pay, and costs little where they
-// do not.
+// do not.  And with Guesses::timed off (--same-answer) the machine's times reach the schedule not at all: the
+// windows of an answer are the same on a machine four times slower.
 //
 //   g++ -std=c++20 -Iinclude src/poly/guesses_test.cpp src/spec/draft_policy.cpp -o guesses_test && ./guesses_test
 #include "guesses.hpp"
@@ -9,6 +10,7 @@
 #include <cstdlib>
 #include <functional>
 #include <random>
+#include <vector>
 
 using strata::poly::Guesses;
 using strata::spec::DraftPolicy;
@@ -48,6 +50,7 @@ struct Play {
     DraftPolicy policy{4};
     std::mt19937 rng{20261010};
     long long round = 0;
+    std::vector<int> sizes;   // the window each round used, in order
 
     Sum rounds(const Machine& m, long long n) {
         Sum s;
@@ -67,6 +70,7 @@ struct Play {
                     if (!g.takes(n_d, p, took)) break;
                 }
             const int t = 1 + n_d;
+            sizes.push_back(t);
             int ok = 0;
             while (ok < n_d && right[ok]) ++ok;
             const double ms = m.one * (1.0 + m.step * (t - 1)) * m.slow(round) + asking;
@@ -76,6 +80,15 @@ struct Play {
         return s;
     }
 };
+
+// The windows of 800 rounds on `m`, with the flag on.
+template<class G>
+std::vector<int> schedule(const Machine& m) {
+    Play<G> p;
+    p.g.timed = false;
+    p.rounds(m, 800);
+    return p.sizes;
+}
 
 // What each case measures, for any rule with Guesses' four calls.
 struct Cases {
@@ -149,6 +162,25 @@ int main() {
     check(c.after_ask > 0.9 * c.steady, "nor does one stalled ask", c.after_ask);
     check(c.after_cold > 0.9 * c.steady, "they begin when windows begin to pay", c.after_cold);
     check(c.dear_rate > 0.97 * alone, "where a window does not pay, looking again costs under 3%", c.dear_rate / alone);
+    // --same-answer: a machine four times slower, and a machine where a window hardly costs more than a token,
+    // must give the same windows as the plain one, since none of that is measured with the flag on.
+    {
+        Machine slower = Machine();
+        slower.one *= 4.0;
+        slower.ask *= 4.0;
+        const std::vector<int> plain = schedule<Guesses>(Machine());
+        const std::vector<int> slow = schedule<Guesses>(slower);
+        int wide = 0, tok = 0;
+        for (int t : plain) wide += t > 1, tok += t;
+        check(!plain.empty() && plain == slow, "timed off: four times slower, the same windows",
+              (double) plain.size());
+        check(wide > 700, "timed off: and the block is asked in most of them", (double) wide);
+        Machine flat = Machine();
+        flat.step = 0.9;   // a token more in a window costs nearly a token
+        check(plain == schedule<Guesses>(flat), "timed off: a dearer window than a token, the same windows",
+              (double) schedule<Guesses>(flat).size());
+        check(tok > 800, "timed off: and the windows still carry more than one token", (double) tok);
+    }
     std::printf("guesses_test: %d checks passed\n", checks);
     return 0;
 }

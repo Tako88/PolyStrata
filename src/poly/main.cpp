@@ -336,7 +336,9 @@ struct Session {
         : engine(e), eos(std::move(eos_ids)), flags(f), kept(e, with_floor(f)),
           most(lookup > 0 || e.drafts() ? std::min<int>(e.max_window(), strata::spec::DraftPolicy::kMaxT) : 1),
           look(lookup > 0 && most > 1),
-          repeats(std::max(lookup, 3), 64, (size_t) e.max_context() + 4096), policy(most) {}
+          repeats(std::max(lookup, 3), 64, (size_t) e.max_context() + 4096), policy(most) {
+        guesses.timed = !e.same_answer();   // --same-answer: the windows follow the tokens, not this machine
+    }
 
     static CacheOptions with_floor(const CacheFlags& f) {
         CacheOptions o = f.o;
@@ -847,7 +849,9 @@ void usage() {
                  "                         ones the fewest tokens chose (default: as the times say; 0 = none)\n"
                  "  --same-answer          the same prompt and settings give the same answer: the expert cache\n"
                  "                         takes an upload on the round's count and not when its copy arrived,\n"
-                 "                         and the CPU's share of the spill stays where it started\n"
+                 "                         the CPU's share of the spill stays where it started, and how many\n"
+                 "                         guesses a round asks for follows the block's probabilities and not\n"
+                 "                         the times this machine measured\n"
                  "  --prompt-cache N       checkpoints kept of a conversation, about 150 MB of RAM each (default 6;\n"
                  "                         0 = a prompt is read from its start unless it goes on from the last token)\n"
                  "  --prompt-cache-every N a checkpoint every N prompt tokens, besides the one at a prompt's end\n"

@@ -13,6 +13,11 @@
 // as the policy counts one it has not seen, and asking as free, and the time measured then stands as it is.  A
 // round among fresh ones counts for twice the time before it at most, so one stall moves a time by a tenth.
 //
+// With --same-answer (timed = false) none of that is measured: a guess joins the window when the block's own
+// probability for it says the window pays at the shape a round's time is assumed to follow (kUnmeasured), and no
+// measured time is kept at all.  The schedule then follows the tokens, which is what makes an answer repeatable:
+// what the windows do to the expert cache follows it too.  It is the machine's own numbers that vary run to run.
+//
 // Nothing here knows the model or the engine.
 #pragma once
 
@@ -62,30 +67,36 @@ public:
 
     Gate gate;
 
+    /// false with --same-answer: the guesses are decided from the block's own probabilities and the assumed shape
+    /// of a round's time, never from a time this machine took, so the same tokens give the same windows.
+    bool timed = true;
+
     /// A round begins.  `blocks`: the block may be asked in it.  Returns whether it is asked at all.
     bool begin(bool blocks, const spec::DraftPolicy& policy) {
         ++round_;
         blocks_ = blocks;
         asked_ = 0;
         sure_ = tokens_ = 1.0;
-        one_ = at_[1] ? ms_[1] : policy.cost_ms(1);   // a token alone is the measure, old or not
-        return blocks && gate.ask();
+        one_ = timed && at_[1] ? ms_[1] : policy.cost_ms(1);   // a token alone is the measure, old or not
+        return blocks && (timed ? gate.ask() : true);
     }
 
     /// Whether the block is asked for a guess more, the window having n of them.
     bool wants(int n) {
         const int to = n + 2;   // the window's tokens with this guess
-        more_ = knows(to) ? std::clamp((ms_[to] - round_ms(to - 1)) / one_, 0.2, 0.8) : kUnmeasured;
+        more_ = timed && knows(to) ? std::clamp((ms_[to] - round_ms(to - 1)) / one_, 0.2, 0.8) : kUnmeasured;
         // asking takes time too: not when a guess the block were sure of would not pay for it
-        const double ask = measured_ && fresh(asked_at_) ? ask_ms_ : 0.0;
+        const double ask = timed && measured_ && fresh(asked_at_) ? ask_ms_ : 0.0;
         return sure_ * round_ms(to - 1) > tokens_ * (more_ * one_ + ask);
     }
 
     /// The block's guess after n others, right with probability p; asking took `ms`.  Returns whether it joins
     /// the window.
     bool takes(int n, double p, double ms) {
-        ask_ms_ = fresh(asked_at_) ? ask_ms_ + 0.1 * (std::min(ms, 2.0 * ask_ms_) - ask_ms_) : ms;
-        asked_at_ = round_;
+        if (timed) {
+            ask_ms_ = fresh(asked_at_) ? ask_ms_ + 0.1 * (std::min(ms, 2.0 * ask_ms_) - ask_ms_) : ms;
+            asked_at_ = round_;
+        }
         ++asked_;
         sure_ *= p;
         if (sure_ * round_ms(n + 1) <= tokens_ * more_ * one_) return false;
@@ -97,6 +108,7 @@ public:
     /// which is the policy's too: none for a round that recorded launches, which took many rounds' time.
     double end(int t, int wrote, double ms, bool recorded) {
         if (recorded) return 0.0;
+        if (!timed) return 0.0;   // nothing of this machine's speed is kept, so the policy prices by its shape
         t = std::clamp(t, 1, spec::DraftPolicy::kMaxT);
         if (knows(t)) ms = std::min(ms, 2.0 * ms_[t]);
         ms_[t] = knows(t) ? ms_[t] + 0.1 * (ms - ms_[t]) : ms;
@@ -108,7 +120,7 @@ public:
 
 private:
     bool fresh(long long at) const { return at && round_ - at <= kFresh; }
-    bool knows(int t) const { return fresh(at_[t]); }
+    bool knows(int t) const { return timed && fresh(at_[t]); }
     // what a round with a window of t tokens takes: as measured, or a token more than the next shorter one
     double round_ms(int t) const { return t <= 1 ? one_ : knows(t) ? ms_[t] : round_ms(t - 1) + kUnmeasured * one_; }
 

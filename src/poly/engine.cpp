@@ -3325,9 +3325,12 @@ void Engine::window(const int32_t* tokens, int t) {
     if (t < 1 || t > opt_.window) throw std::logic_error("a window takes 1 to max_window() tokens");
     OnCard here(device_, split_);
     // the two ways are a choice only with experts on the CPU; a call that records launches says nothing of them
-    const bool timed = t > 1 && !all_cached();
+    const bool time_way = t > 1 && !all_cached();
     const bool recorded = std::exchange(recorded_, false);
-    if (timed) halves_ = pick_way(t);
+    // --same-answer takes one way and keeps it: the two ways count a call's experts a call at a time (Options::
+    // tail_skip is "every token of the call ranks it this far down"), so they can leave different experts out and
+    // write different numbers.  Which way it is is then decided, not measured.
+    if (time_way) halves_ = opt_.same_answer ? false : pick_way(t);
     const Clock::time_point t0 = Clock::now();
     windowed_ = true;
     snap_bits_ = snap_tokens(t);
@@ -3345,7 +3348,7 @@ void Engine::window(const int32_t* tokens, int t) {
     std::copy(tokens, tokens + t, win_tok_);
     if (next_) {   // a card's way is timed by its own layers
         hand_on(pos_, t, pass_rows(t));
-        if (timed && !recorded_) took_way(t, ms_since(t0));
+        if (time_way && !recorded_) took_way(t, ms_since(t0));
         recorded_ = recorded_ || recorded;
         win_ = t;
         next_->window(tokens, t);
@@ -3358,7 +3361,7 @@ void Engine::window(const int32_t* tokens, int t) {
     ck(cudaMemcpyAsync(h_wlogits_, wlogits_, (size_t) t * n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
        "logits");
     ck(cudaStreamSynchronize(cs(st_)), "window");
-    if (timed && !recorded_) took_way(t, ms_since(t0));
+    if (time_way && !recorded_) took_way(t, ms_since(t0));
     recorded_ = recorded_ || recorded;
     win_ = t;
 }
