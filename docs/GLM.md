@@ -182,6 +182,20 @@ of the file. The rest of the weights are always in VRAM.
   on the other in the next. The first request can still differ, since the cache is sized once more before the
   second. A prompt of 32 tokens or more needs `--cpu-share 0` beside it: the CPU's share of such a call's experts
   follows the calls before.
+- **The same answer every time.** An expert's result differs in its last digits between the CPU and the card, so an
+  answer repeats only when the same experts run on the same processor. Two things in the engine used to decide that
+  from measured times: a slot was handed to the next expert the moment its copy happened to arrive, which changes
+  how many experts are on their way at each token, and the CPU's share of a spill followed the calls before.
+  `--same-answer` counts the handover in rounds of the answer instead (an upload is due two rounds after it was
+  asked for) and leaves that share where it started, so the cache follows the tokens and not the machine. Measured
+  on an RX 9060 XT with Ornith 1.5 35B-A3B Q4_K_M, a 316-token prompt, 400 tokens, greedy, a fresh process each
+  run: without the flag three runs gave three different answers; with `--same-answer --window 1` three runs gave
+  the same answer at 59.97 tokens/s, against 51.8 to 52.6 tokens/s for `--cpu-share 0 --expert-swaps 0`. The flag
+  costs nothing measurable by itself (65.2 to 65.7 tokens/s against 65.0 to 67.2 without it, draft block on). It
+  does not yet give the same answer with the draft block on: the window sizes that block picks follow measured
+  times too, which changes how often the cache's counts decay and so which experts are swapped in. Two sources lie
+  outside the flag: the number of experts kept from the start follows the card's free VRAM at load, and use counts
+  carry over between requests in one process, so the promise is for a fresh process with the same cache.
 - **Writing an answer.** An expert that is not in VRAM runs on the CPU while the card runs its share. The CPU reads
   such an expert from memory, and on a PC with more than one NUMA node that memory is on the node whose CPU first
   read the file. The engine looks where the experts' pages are and keeps its CPU threads on that node: from the
@@ -263,6 +277,7 @@ goes on from where it stopped, and an edit goes back to the nearest checkpoint.
 | `--stage-mib N` | 2048 | VRAM the experts outside the cache pass through while a prompt is read |
 | `--stage-ahead N` | 1024 | from N tokens, a batch copies those experts before the layer has chosen, as does every batch of a prompt of N tokens or more that is read several at a time; 0 = never |
 | `--cpu-share F` | as the times say | in a batch of fewer tokens than `--stage-ahead`, the share of the experts outside VRAM that the CPU computes while the others are copied: the ones the fewest tokens chose; 0 = none |
+| `--same-answer` | | the same prompt and settings give the same answer: an upload's slot is taken on the round's count and not when its copy arrived, and the CPU's share of the spill stays where it started |
 | `--prompt-cache N` | 6 | checkpoints kept of a conversation; 0 = only a next turn is not read again |
 | `--prompt-cache-every N` | 2048 | a checkpoint every N prompt tokens, besides the one at a prompt's end; 0 = none |
 | `--conversation-cache-mib N` | 0 | RAM for parked conversations; 0 = off |

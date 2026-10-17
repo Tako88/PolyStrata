@@ -78,6 +78,10 @@ struct Options {
                                   ///< below 0: as the two took the time between them; 0: none
     int expert_swaps = 64;        ///< experts on their way into the cache at a time while an answer is written, each
                                   ///< to the slot of one the answer uses less; 0: the cache stays as it was loaded
+    bool same_answer = false;     ///< an answer depends on its tokens and not on how long a copy took: the cache
+                                  ///< hands an upload's slot over on the round's count (kSwapSettle) and the CPU's
+                                  ///< share of the spill stays at its own value, so the same prompt and settings
+                                  ///< give the same answer (--same-answer)
     bool stay_near = true;        ///< with several NUMA nodes, keep the CPU threads on the one that holds the experts
     bool graphs = true;           ///< a token's fixed launches are recorded once, a CUDA graph a layer, and replayed
     bool kv_grow = true;          ///< the attention caches get VRAM as the sequence grows, where the card can map it
@@ -747,6 +751,7 @@ protected:
     };
     std::unique_ptr<Swap[]> swap_;   ///< the experts on their way, opt_.expert_swaps at most
     int n_swap_ = 0, n_trade_ = 0;
+    int64_t follow_round_ = 0;       ///< follow() calls so far: what --same-answer counts an upload's age in
     size_t slot_max_ = 0;            ///< the largest expert of the cache
     void* swap_st_ = nullptr;        ///< the stream of their uploads
     std::thread follower_;

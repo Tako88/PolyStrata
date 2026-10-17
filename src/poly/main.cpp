@@ -845,6 +845,9 @@ void usage() {
                  "                         0 = never)\n"
                  "  --cpu-share F          under that, the share of those experts the CPU computes meanwhile, the\n"
                  "                         ones the fewest tokens chose (default: as the times say; 0 = none)\n"
+                 "  --same-answer          the same prompt and settings give the same answer: the expert cache\n"
+                 "                         takes an upload on the round's count and not when its copy arrived,\n"
+                 "                         and the CPU's share of the spill stays where it started\n"
                  "  --prompt-cache N       checkpoints kept of a conversation, about 150 MB of RAM each (default 6;\n"
                  "                         0 = a prompt is read from its start unless it goes on from the last token)\n"
                  "  --prompt-cache-every N a checkpoint every N prompt tokens, besides the one at a prompt's end\n"
@@ -943,6 +946,7 @@ int main(int argc, char** argv) {
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
         else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());
         else if (a == "--cpu-share") o.cpu_share = (float) std::atof(val());
+        else if (a == "--same-answer") o.same_answer = true;
         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());
         else if (a == "--prompt-cache-every") cache.o.every = std::atoll(val());
         else if (a == "--conversation-cache-mib") cache.o.park_mib = std::atoll(val());

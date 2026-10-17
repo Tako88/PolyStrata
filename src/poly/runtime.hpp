@@ -43,6 +43,11 @@ constexpr size_t kTail = 256;
 // noisy, and an upload gets in the way of the work: a slot goes to an expert that will clearly be used more.
 constexpr float kSwapMin = 2.f;
 constexpr int kSwapHalf = 128;
+// --same-answer (Options::same_answer): the follow() calls an upload has before its slot may be handed to another
+// expert.  The copy runs beside the answer, so a round or two of it is covered already; what matters is that the
+// handover is counted and never timed, because a slot taken the moment its copy happened to arrive is what makes
+// the cache depend on the machine instead of on the answer.
+constexpr int kSwapSettle = 2;
 // Engine::pick_way(): each way of a window is timed this many times before the faster one is taken.  What a way
 // takes moves, most in an answer's first windows, while the cache comes to hold the answer's experts, so the way
 // behind is timed again after kWayAgain windows of that size, then after twice as many each time it is still

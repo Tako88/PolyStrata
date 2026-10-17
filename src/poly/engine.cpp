@@ -353,6 +353,7 @@ struct Engine::Swap {
     enum { kFree, kAsked, kSent };
     std::atomic<int> at{kFree};
     int il = 0, e = 0;
+    int64_t round = 0;             // the follow() round it was asked in (--same-answer counts its age in these)
     uint8_t* slot = nullptr;       // where it goes in VRAM: the slot of the expert it replaces
     uint8_t* pinned = nullptr;
     cudaEvent_t done = nullptr;    // marks its upload
@@ -713,6 +714,21 @@ void Engine::settle_swaps() {
         while (swap_[(size_t) j].at.load() == Swap::kAsked && !failed()) std::this_thread::yield();
     if (failed()) throw std::runtime_error("expert upload: " + swap_error_);
     ck(cudaStreamSynchronize(cs(swap_st_)), "expert upload");
+    if (opt_.same_answer) {
+        // Settling means settling: every upload that finished is handed over here, whatever its age, because the
+        // caller (shrink_cache()/grow_cache()) is about to move the arena these slots point into, and follow(0)
+        // below would hold the young ones back.  The stream was drained above, so their bytes are in place.
+        const size_t ne = (size_t) n_expert_;
+        for (int j = 0; j < n_swap_; ++j) {
+            Swap& s = swap_[(size_t) j];
+            if (s.at.load() != Swap::kSent) continue;
+            layers_[(size_t) s.il].slot[(size_t) s.e] = s.slot;
+            coming_[(size_t) s.il * ne + (size_t) s.e] = 0;
+            s.at.store(Swap::kFree);
+            ++stats_.swapped_experts;
+            staged_il_ = -1;
+        }
+    }
     follow(0);
 }
 
@@ -1578,9 +1594,11 @@ void Engine::follow_loop() {
         lk.lock();
         if (err != cudaSuccess) {
             swap_error_ = cudaGetErrorString(err);
+            swap_cv_.notify_all();   // a follow() waiting for this upload must not sleep forever
             return;
         }
         s->at.store(Swap::kSent);
+        swap_cv_.notify_all();   // a follow() waiting for a due upload re-reads the slots
     }
 }
 
@@ -1591,19 +1609,47 @@ void Engine::follow_loop() {
 //
 // A prompt batch neither counts nor moves anything.  What a prompt routes to says no more about the answer than
 // the profile does, and moving the cache while the prompt was read cost 3% of the reading speed (measured).
+//
+// With --same-answer the handover is counted in rounds and never timed, and the CPU's share of the spill stays
+// where it started, so which experts the card or the CPU computes follows the answer, not the machine's speed.
 void Engine::follow(int written) {
     {
         std::lock_guard<std::mutex> l(swap_m_);
         if (!swap_error_.empty()) throw std::runtime_error("expert upload: " + swap_error_);
     }
     const size_t ne = (size_t) n_expert_;
+    const int64_t round = ++follow_round_;
     int n_free = 0;
+    if (opt_.same_answer && n_swap_ > 0 && swap_st_) {
+        // A slot goes to the next expert on the round's count, never on the moment the copy happened to arrive.
+        // An upload asked in this round is not due yet; one that is due and that the thread which copies it has
+        // not reached yet is waited for, and the stream is drained before any slot is handed over, so the bytes
+        // are there when a kernel reads them.  An upload asked a round or more ago has had a round of the answer
+        // (roughly 15-40 ms of decode) to land, so this wait is normally met already.
+        {
+            std::unique_lock<std::mutex> lk(swap_m_);
+            swap_cv_.wait(lk, [&] {
+                if (!swap_error_.empty()) return true;   // the thread that copies is gone (checked below)
+                for (int j = 0; j < n_swap_; ++j) {
+                    const Swap& s = swap_[(size_t) j];
+                    if (s.at.load() == Swap::kAsked && round - s.round >= kSwapSettle) return false;
+                }
+                return true;
+            });
+            if (!swap_error_.empty()) throw std::runtime_error("expert upload: " + swap_error_);
+        }
+        ck(cudaStreamSynchronize(cs(swap_st_)), "expert upload");
+    }
     for (int j = 0; j < n_swap_; ++j) {
         Swap& s = swap_[(size_t) j];
         if (s.at.load() == Swap::kSent) {
-            const cudaError_t arrived = cudaEventQuery(s.done);
-            if (arrived == cudaErrorNotReady) continue;
-            ck(arrived, "expert upload");
+            if (opt_.same_answer) {
+                if (round - s.round < kSwapSettle) continue;   // not due in this round
+            } else {
+                const cudaError_t arrived = cudaEventQuery(s.done);
+                if (arrived == cudaErrorNotReady) continue;
+                ck(arrived, "expert upload");
+            }
             layers_[(size_t) s.il].slot[(size_t) s.e] = s.slot;
             coming_[(size_t) s.il * ne + (size_t) s.e] = 0;
             s.at.store(Swap::kFree);
@@ -1681,6 +1727,7 @@ void Engine::follow(int written) {
         given = nullptr;
         staged_il_ = -1;
         coming_[(size_t) in.il * ne + (size_t) in.e] = 1;
+        s->round = round;
         s->at.store(Swap::kAsked);
         asked = true;
     }
@@ -2667,8 +2714,10 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         const double gpu = std::chrono::duration<double, std::milli>(done - start).count();
         stats_.cpu_ms += cpu;
         stats_.cpu_experts += (int64_t) host_.size();
-        // the share that would have had both done at once, if each one's time grows with its share
-        if (opt_.cpu_share < 0 && n_cpu < n_spare) {
+        // the share that would have had both done at once, if each one's time grows with its share.  With
+        // --same-answer it stays where it started: learning it from these times is what would make the split
+        // depend on the machine rather than on the answer.
+        if (!opt_.same_answer && opt_.cpu_share < 0 && n_cpu < n_spare) {
             const double s = (double) n_cpu / n_spare, c = cpu / s, g = gpu / (1 - s);
             share_[size] = std::clamp(0.5 * share_[size] + 0.5 * g / (c + g), 0.05, 0.95);
         }
